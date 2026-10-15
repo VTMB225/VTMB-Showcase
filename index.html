@@ -689,16 +689,20 @@ function fmtNummer(fmt, n, datum) {
   const y = (datum || today()).slice(0, 4);
   return fmt.replace('{JJJJ}', y).replace('{JJ}', y.slice(2)).replace('{MM}', (datum || today()).slice(5, 7)).replace(/\{(N+)\}/, (_, ns) => pad(n, ns.length));
 }
-function nextNummer(art, datum, coll = 'belege', typField = 'typ') {
-  const c = cfg(); const fmt = c.nummern[art] || (art.toUpperCase().slice(0, 2) + '-{JJJJ}-{NNN}');
+// Stand eines Nummernkreises: höchste vergebene Nummer, gespeicherter Zähler, nächste Nummer
+function nrStand(art, datum, coll = 'belege', fmtOverride, zaehler) {
+  const c = cfg(); const fmt = fmtOverride || c.nummern[art] || (art.toUpperCase().slice(0, 2) + '-{JJJJ}-{NNN}');
   const probe = fmtNummer(fmt, 0, datum); const prefix = probe.replace(/0+$/, '');
   let max = 0;
   const items = coll === 'belege' ? all('belege').filter(b => nrArt(b.typ) === art) : all(coll);
   items.forEach(x => { if (x.nr && x.nr.startsWith(prefix)) { const n = parseInt(x.nr.slice(prefix.length), 10); if (n > max) max = n; } });
-  const zk = prefix; const z = c.zaehler && c.zaehler[zk] || 0;
-  const n = Math.max(max, z) + 1;
-  const cc = clone(c); cc.zaehler = cc.zaehler || {}; cc.zaehler[zk] = n; DB.put('meta', cc); if (typeof Sync !== 'undefined') Sync.bald();
-  return fmtNummer(fmt, n, datum);
+  const zl = zaehler || c.zaehler || {}; const z = nz(zl[prefix]);
+  return { fmt, prefix, max, z, next: Math.max(max, z) + 1 };
+}
+function nextNummer(art, datum, coll = 'belege', typField = 'typ') {
+  const c = cfg(); const st = nrStand(art, datum, coll); const n = st.next;
+  const cc = clone(c); cc.zaehler = cc.zaehler || {}; cc.zaehler[st.prefix] = n; DB.put('meta', cc); if (typeof Sync !== 'undefined') Sync.bald();
+  return fmtNummer(st.fmt, n, datum);
 }
 const RE_TYPEN = ['rechnung', 'abschlag', 'schluss', 'storno', 'korrektur'];
 const nrArt = t => RE_TYPEN.includes(t) ? 'rechnung' : t;
@@ -1276,6 +1280,8 @@ const empf = b => b.partnerId ? get('partner', b.partnerId) : get('kunden', b.ku
 const kName = k => !k ? '–' : (k.firma || [k.vorname, k.nachname].filter(Boolean).join(' ') || k.name || '–');
 function bezahlt(b) { return r2(sum(b.zahlungen || [], z => z.betrag)); }
 function mahnKosten(b) { return r2(sum(b.mahnungen || [], m => nz(m.gebuehr) + nz(m.zinsen))); }
+// Zählt zum Umsatz: festgeschriebene Rechnung, nicht storniert, keine Stornorechnung (Original + Storno heben sich auf)
+const zaehltUmsatz = b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert' && b.typ !== 'storno';
 function offen(b) { if (!isRechnungTyp(b.typ) || !b.fest || b.status === 'storniert' || b.typ === 'storno') return 0; return r2(belegSummen(b).brutto + mahnKosten(b) - bezahlt(b)); }
 function belegStatus(b) {
   const t = today();
@@ -1381,7 +1387,7 @@ function personEinsatzKosten(pe) { const p = get('personen', pe.personId); if (!
 function kalkulation(aid) {
   const a = get('auftraege', aid); if (!a) return null;
   const bl = all('belege').filter(b => b.auftragId === aid);
-  const rech = bl.filter(b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert');
+  const rech = bl.filter(zaehltUmsatz);
   let umsatz = r2(sum(rech, b => belegSummen(b).netto)), umsatzQuelle = 'Rechnungen';
   if (!rech.length) { const ang = bl.filter(b => b.typ === 'auftrag' || (b.typ === 'angebot' && b.status === 'angenommen')).sort(by(b => b._u, -1))[0] || bl.filter(b => b.typ === 'angebot').sort(by(b => b._u, -1))[0]; umsatz = ang ? belegSummen(ang).netto : 0; umsatzQuelle = ang ? `${typLabel(ang.typ)} ${ang.nr || ''} (geplant)` : 'noch kein Beleg'; }
   const zum = all('einsaetze').filter(e => e.auftragId === aid && e.quelle === 'zumiete');
@@ -1484,12 +1490,12 @@ function vermietStatistik(jahr, f = {}) {
     if (au) r.kunden[au.kundeId] = (r.kunden[au.kundeId] || 0) + 1;
     if (e.quelle === 'zumiete') r.zumietKosten += nz(e.menge) * nz(e.ek ?? r.a.ek) * mietFaktor(daysIncl(z.von, z.bis));
   });
-  all('belege').filter(b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert' && b.datum >= y1 && b.datum <= y2).forEach(b => {
+  all('belege').filter(b => zaehltUmsatz(b) && b.datum >= y1 && b.datum <= y2).forEach(b => {
     if (f.kunde && b.kundeId !== f.kunde) return; const rg = 1 - nz(b.rabattGesamt) / 100;
     (b.positionen || []).forEach(p => { if (res[p.artikelId] && (!p.optional || p.gewaehlt)) res[p.artikelId].umsatz += posNetto(p) * rg; });
   });
   // Umsatz gesamt seit Kauf (Amortisation)
-  const gesamt = {}; all('belege').filter(b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert').forEach(b => { const rg = 1 - nz(b.rabattGesamt) / 100; (b.positionen || []).forEach(p => { if (p.artikelId) gesamt[p.artikelId] = (gesamt[p.artikelId] || 0) + posNetto(p) * rg; }); });
+  const gesamt = {}; all('belege').filter(zaehltUmsatz).forEach(b => { const rg = 1 - nz(b.rabattGesamt) / 100; (b.positionen || []).forEach(p => { if (p.artikelId) gesamt[p.artikelId] = (gesamt[p.artikelId] || 0) + posNetto(p) * rg; }); });
   return Object.values(res).map(r => {
     const verf = Math.max(1, nz(r.a.bestand)) * tageJahr;
     const umsGes = r2(gesamt[r.a.id] || 0);
@@ -1939,7 +1945,7 @@ VIEWS.kunden = () => {
   if (S.p.id) return kundeDetail(get('kunden', S.p.id));
   const y = today().slice(0, 4); const showArch = S.f.karch === '1';
   const list = all('kunden').filter(k => showArch ? k.archiv : !k.archiv).filter(k => matchQ('kunden', k.nr, kName(k), k.ort, k.email, k.ansprechpartner)).filter(k => !S.f.kkat || String(k.preisKat) === S.f.kkat).sort(by(k => kName(k).toLowerCase()));
-  const ums = {}, off = {}; all('belege').forEach(b => { if (!isRechnungTyp(b.typ) || !b.fest || b.status === 'storniert') return; if (b.datum && b.datum.startsWith(y)) ums[b.kundeId] = (ums[b.kundeId] || 0) + belegSummen(b).netto; off[b.kundeId] = (off[b.kundeId] || 0) + offen(b); });
+  const ums = {}, off = {}; all('belege').forEach(b => { if (!zaehltUmsatz(b)) return; if (b.datum && b.datum.startsWith(y)) ums[b.kundeId] = (ums[b.kundeId] || 0) + belegSummen(b).netto; off[b.kundeId] = (off[b.kundeId] || 0) + offen(b); });
   const rows = list.map(k => `<tr class="click" data-act="go" data-v="kunden" data-id="${k.id}"><td class="num">${esc(k.nr)}</td><td><b>${esc(kName(k))}</b>${k.partnerLink && get('partner', k.partnerLink) ? ' ' + pill('auch Lieferant', 'info') : ''}${k.typ !== 'privat' && k.ansprechpartner ? `<div class="small muted">${esc(k.ansprechpartner)}</div>` : ''}</td><td class="hide-m">${esc(k.ort || '')}</td><td>${pill(katName(k.preisKat || 3))}</td>${canPreise() ? `<td class="r num">${eur(ums[k.id] || 0)}</td><td class="r num">${off[k.id] > 0 ? `<span style="color:var(--bad)">${eur(off[k.id])}</span>` : '–'}</td>` : ''}</tr>`).join('');
   return page('Kunden', `${active('kunden').length} Kunden`, `${btn('Import (CSV/Excel)', 'imp', { 'data-k': 'kunden' })}${btn('Excel-Export', 'kundxls')}${btn(ic('plus') + 'Neuer Kunde', 'kneu', {}, 'pri')}`,
     `<div class="bar">${searchBox('kunden', 'Name, Ort, Nr. …')}<select class="inp" style="max-width:200px" data-fsel="kkat" aria-label="Preiskategorie"><option value="">Alle Kategorien</option>${[1, 2, 3, 4, 5].map(k => `<option value="${k}" ${S.f.kkat == k ? 'selected' : ''}>${esc(katName(k))}</option>`).join('')}</select><select class="inp" style="max-width:160px" data-fsel="karch" aria-label="Archiv"><option value="">Aktive</option><option value="1" ${showArch ? 'selected' : ''}>Archiviert</option></select></div>` +
@@ -1949,7 +1955,7 @@ function kundeDetail(k) {
   if (!k) return page('Kunde nicht gefunden', '', btn('Zurück', 'go', { 'data-v': 'kunden' }), '');
   const bl = all('belege').filter(b => b.kundeId === k.id).sort(by(b => b.datum || b._c, -1));
   const au = all('auftraege').filter(a => a.kundeId === k.id).sort(by(a => aufZeit(a).von || '', -1));
-  const rech = bl.filter(b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert');
+  const rech = bl.filter(zaehltUmsatz);
   const y = today().slice(0, 4);
   const ad = [k.strasse, `${k.plz || ''} ${k.ort || ''}`.trim()].filter(Boolean).join(', ');
   return page(esc(kName(k)), `${esc(k.nr || '')} · ${esc(katName(k.preisKat || 3))}${k.rabatt ? ` · ${numS(k.rabatt)} % Rabatt` : ''}`,
@@ -2353,7 +2359,7 @@ VIEWS.belege = () => {
     const list = all('belege').filter(groups[tab]).filter(b => !y || (b.datum || '').startsWith(y)).filter(b => !stf || belegStatus(b)[0].startsWith(stf)).filter(b => matchQ('belege', b.nr, kName(empf(b)), b.titel, typLabel(b.typ))).sort(by(b => (b.datum || '') + (b.nr || 'zzz'), -1));
     const stati = [...new Set(all('belege').filter(groups[tab]).map(b => belegStatus(b)[0].split(' ·')[0]))];
     const pr = canPreise();
-    const tot = pr && list.length ? `<div class="small muted">${list.length} Belege · Summe brutto ${eur(sum(list.filter(b => b.status !== 'storniert'), b => belegSummen(b).brutto))}${tab === 'rechnungen' ? ` · offen ${eur(sum(list, offen))}` : ''}</div>` : '';
+    const tot = pr && list.length ? `<div class="small muted">${list.length} Belege · Summe brutto ${eur(sum(list.filter(b => b.status !== 'storniert' && b.typ !== 'storno'), b => belegSummen(b).brutto))}${tab === 'rechnungen' ? ` · offen ${eur(sum(list, offen))}` : ''}</div>` : '';
     body = `<div class="bar">${searchBox('belege', 'Nr., Kunde, Titel …')}<select class="inp" style="max-width:150px" data-fsel="bst" aria-label="Status"><option value="">Alle Status</option>${stati.map(s => `<option ${stf === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select><select class="inp" style="max-width:120px" data-fsel="bjahr" aria-label="Jahr"><option value="">Alle Jahre</option>${[...new Set(all('belege').map(b => (b.datum || '').slice(0, 4)).filter(Boolean))].sort().reverse().map(j => `<option ${y === j ? 'selected' : ''}>${j}</option>`).join('')}</select>${tot}</div>` + card('', belegTabelle(list, tab === 'anfragen'), '', true);
   }
   const neuTyp = { angebote: 'angebot', auftraege: 'auftrag', rechnungen: 'rechnung', lieferscheine: 'lieferschein', anfragen: 'mietanfrage' }[tab] || 'angebot';
@@ -2530,7 +2536,11 @@ function belegAnsicht(b) {
   const rel = all('belege').filter(x => x.id !== b.id && ((b.auftragId && x.auftragId === b.auftragId) || x.ausBeleg === b.id || x.id === b.ausBeleg || x.bezugId === b.id || x.id === b.bezugId));
   if (rel.length) side.push(card('Zugehörige Belege', belegTabelle(rel.sort(by(x => x.datum))), '', true));
   if (b.fest) side.push(card('Revisionssicherheit', `<div class="small">Festgeschrieben am ${fmtTs(b.festAm)}${b.festVon ? ' von ' + esc(b.festVon) : ''}.<br>Prüfsumme: <span class="mono tiny">${esc((b.hash || '').slice(0, 24))}…</span><br>Aufbewahren bis mindestens ${fmtD(aufbewahrenBis(b))}.</div>`));
-  const banner = b.status === 'storniert' ? `<div class="note bad">Diese Rechnung wurde storniert${b.stornoNr ? ' mit ' + esc(b.stornoNr) : ''}.</div>` : b.fest ? `<div class="note">${ic('lock').replace('<svg', '<svg style="width:15px;height:15px;vertical-align:-3px;stroke:currentColor;fill:none;stroke-width:2"')} Festgeschrieben – Inhalt kann nicht mehr geändert werden. Änderungen über <b>Stornieren</b> oder <b>Korrekturrechnung</b>.</div>` : b.typ === 'angebot' ? `<div class="note info">Angebot ist ${esc(st[0].toLowerCase())}. Zum Ändern „Neue Version“ wählen – die bisherige Fassung bleibt gespeichert.</div>` : '';
+  const lockIc = ic('lock').replace('<svg', '<svg style="width:15px;height:15px;vertical-align:-3px;stroke:currentColor;fill:none;stroke-width:2"');
+  const banner = b.status === 'storniert' ? `<div class="note bad bar" style="justify-content:space-between">Diese Rechnung wurde${b.stornoAm ? ' am ' + fmtD(b.stornoAm) : ''} storniert${b.stornoNr ? ' mit ' + esc(b.stornoNr) : ''}${b.stornoGrund ? ' – Grund: ' + esc(b.stornoGrund) : ''}.${b.stornoId && get('belege', b.stornoId) ? btn('Stornorechnung öffnen', 'bstornoauf', { 'data-id': b.stornoId }, 'sm') : ''}</div>`
+    : b.typ === 'storno' && b.fest ? `<div class="note info bar" style="justify-content:space-between">Stornorechnung zu ${esc(b.bezugNr || '')}${b.stornoGrund ? ' – Grund: ' + esc(b.stornoGrund) : ''}. Schicke sie dem Kunden als PDF.${b.bezugId && get('belege', b.bezugId) ? btn('Originalrechnung öffnen', 'bstornoauf', { 'data-id': b.bezugId }, 'sm') : ''}</div>`
+    : b.fest && isRechnungTyp(b.typ) ? `<div class="note bar" style="justify-content:space-between"><span>${lockIc} Festgeschrieben – Inhalt kann nicht mehr geändert werden.</span><span class="bar">${btn('Korrigieren …', 'bkorrektur', {}, 'sm')}${btn('Stornieren …', 'bstorno', {}, 'sm danger')}</span></div>`
+    : b.fest ? `<div class="note">${lockIc} Festgeschrieben – Inhalt kann nicht mehr geändert werden.</div>` : b.typ === 'angebot' ? `<div class="note info">Angebot ist ${esc(st[0].toLowerCase())}. Zum Ändern „Neue Version“ wählen – die bisherige Fassung bleibt gespeichert.</div>` : '';
   return `<div class="page"><div class="phead"><div><div class="bar">${btn(ic('back'), 'go', { 'data-v': 'belege', 'aria-label': 'Zurück' }, 'ghost sm')}<h1>${esc(typLabel(b.typ))} ${esc(b.nr || '')}${b.typ === 'angebot' ? ` <span class="muted" style="font-size:.7em">V${b.version || 1}</span>` : ''}</h1>${pill(st[0], st[1])}</div><div class="sub">${esc(kName(empf(b)))}${pr && b.typ !== 'mahnung' && b.typ !== 'lieferschein' ? ' · ' + eur(sm.brutto) : ''}</div></div>
   <div class="acts">${btn(ic('dl') + 'PDF', 'bpdf')}${btn(ic('mail') + 'Senden', 'bmail')}${b.typ === 'angebot' && b.status !== 'entwurf' ? btn('Neue Version bearbeiten', 'bversion') : ''}${belegAktionen(b)}</div></div>
   ${banner}<div class="grid split"><div class="paperwrap">${belegVorschau(b)}</div><div class="grid">${side.join('')}</div></div></div>`;
@@ -2591,22 +2601,38 @@ A.blsfest = () => { const b = clone(S.edit); delete b._beleg; confirmBox('Liefer
 A.bzahlung = () => { const b = curBeleg(); S.medit = { datum: today(), betrag: offen(b), art: 'bank', notiz: '' }; openModal({ title: `Zahlung zu ${esc(b.nr)}`, size: 'narrow', body: () => `<div class="form">${fld('Datum', inpD('m.datum', S.medit.datum), 'w6')}${fld('Betrag', inp('m.betrag', S.medit.betrag, { t: 'num' }), 'w6', `offen: ${eur(offen(b))}`)}${fld('Zahlungsart', sel('m.art', S.medit.art, [['bank', 'Überweisung'], ['bar', 'Bar (Kassenbuch)'], ['paypal', 'PayPal'], ['karte', 'EC-/Kreditkarte'], ['sonst', 'Sonstiges']]), 'w12')}${fld('Notiz', inp('m.notiz', S.medit.notiz), 'w12')}</div>`, foot: () => btn('Abbrechen', 'mclose') + btn('Speichern', 'bzahlok', {}, 'pri') }); };
 A.bzahlok = () => { const b = clone(get('belege', curBeleg().id)); const m = S.medit; if (!nz(m.betrag)) { toast('Betrag eingeben.', 'bad'); return; } b.zahlungen = b.zahlungen || []; b.zahlungen.push({ id: uid('z'), datum: m.datum, betrag: r2(m.betrag), art: m.art, notiz: m.notiz }); b.zahlungen.sort(by(z => z.datum)); if (offen(b) <= 0.004) b.status = 'bezahlt'; DB.put('belege', b); audit('Zahlung', `${b.nr}`, eur(m.betrag)); S.edit = null; closeModal(); toast('Zahlung gespeichert.'); };
 A.bzahldel = t => { const b = clone(get('belege', curBeleg().id)); confirmBox('Zahlung entfernen?', 'Entfernen', () => { const z = b.zahlungen.splice(+t.dataset.i, 1)[0]; if (b.status === 'bezahlt') b.status = 'offen'; if (z && z.bankId) { const bk = get('bank', z.bankId); if (bk) { const n = clone(bk); n.zuordnung = null; DB.put('bank', n); } } DB.put('belege', b); audit('Zahlung entfernt', b.nr, eur(z?.betrag)); S.edit = null; }); };
-A.bstorno = () => { const b = clone(get('belege', curBeleg().id)); confirmBox(`Rechnung ${esc(b.nr)} stornieren? Es wird eine Stornorechnung mit negativen Beträgen erzeugt und festgeschrieben.`, 'Stornieren', () => stornieren(b)); };
-async function stornieren(b, korr) {
+// Stornieren: Dialog mit Grund und Wahl „nur stornieren“ / „stornieren + korrigierte Rechnung“
+const STORNO_GRUENDE = ['Rechnung fehlerhaft', 'Auftrag abgesagt', 'Doppelt erstellt', 'Falscher Empfänger', 'Preis/Leistung geändert'];
+function stornoDialog(korr) {
+  const b = clone(get('belege', curBeleg().id)); if (!b || !b.fest || b.status === 'storniert' || b.typ === 'storno') return;
+  const bez = bezahlt(b); S.medit = { korr: !!korr, grund: '' };
+  openModal({ title: `${typLabel(b.typ)} ${esc(b.nr)} stornieren`, body: () => { const m = S.medit; return `<div class="list" style="margin-bottom:12px"><div class="li"><span class="muted">Rechnung</span><span class="grow r b">${esc(b.nr)} vom ${fmtD(b.datum)}</span></div><div class="li"><span class="muted">Empfänger</span><span class="grow r">${esc(kName(empf(b)))}</span></div><div class="li"><span class="muted">Betrag</span><span class="grow r num">${eur(belegSummen(b).brutto)}</span></div>${bez ? `<div class="li"><span class="muted">bereits bezahlt</span><span class="grow r num">${eur(bez)}</span></div>` : ''}</div>
+    <div class="form"><div class="w12 fld"><span>Grund (erscheint auf der Stornorechnung)</span><div class="chips" style="margin-bottom:6px">${STORNO_GRUENDE.map(g => `<button type="button" class="chip ${m.grund === g ? 'on' : ''}" data-act="stornogrund" data-v="${esc(g)}">${esc(g)}</button>`).join('')}</div>${inp('m.grund', m.grund, { placeholder: 'oder eigenen Grund eintragen (optional)' })}</div>
+    <div class="w12"><label class="chk"><input type="radio" name="stornoart" data-act="stornoart" data-v="0" ${m.korr ? '' : 'checked'}><span><b>Nur stornieren</b> – z. B. Auftrag abgesagt oder Rechnung doppelt</span></label></div>
+    <div class="w12"><label class="chk"><input type="radio" name="stornoart" data-act="stornoart" data-v="1" ${m.korr ? 'checked' : ''}><span><b>Stornieren und neue, korrigierte Rechnung anlegen</b> – die Positionen werden als Entwurf übernommen, du änderst sie und schreibst neu fest</span></label></div></div>
+    <div class="note info" style="margin-top:12px">Die Originalrechnung bleibt unverändert erhalten (Pflicht nach GoBD). Es entsteht eine <b>Stornorechnung mit eigener Nummer</b> und negativen Beträgen, die du dem Kunden schickst. Im Umsatz und in der Umsatzsteuer heben sich beide auf.${bez ? ` <b>Bereits gezahlte ${eur(bez)}</b> werden auf der Stornorechnung als Erstattung bzw. Verrechnung vermerkt – die Rücküberweisung buchst du wie gewohnt als Ausgabe.` : ''}</div>`; },
+    foot: () => btn('Abbrechen', 'mclose') + btn(S.medit.korr ? 'Stornieren & korrigieren' : 'Jetzt stornieren', 'stornook', {}, 'danger') });
+}
+A.stornogrund = t => { S.medit.grund = S.medit.grund === t.dataset.v ? '' : t.dataset.v; renderModal(); };
+A.stornoart = t => { S.medit.korr = t.dataset.v === '1'; renderModal(); };
+A.stornook = () => { const b = clone(get('belege', curBeleg().id)); const m = S.medit; closeModal(); stornieren(b, m.korr, String(m.grund || '').trim()); };
+A.bstorno = () => stornoDialog(false);
+A.bstornoauf = t => go('belege', { id: t.dataset.id });
+async function stornieren(b, korr, grund) {
   const s = belegKopie(b, 'storno'); s.positionen = clone(b.positionen).map(p => ({ ...p, id: uid('p'), menge: istPosition(p) ? -nz(p.menge) : p.menge })); s.positionen = s.positionen.filter(p => !p.optional || p.gewaehlt);
-  Object.assign(s, { bezugId: b.id, bezugNr: b.nr, datum: today(), einleitung: `Hiermit stornieren wir die Rechnung ${b.nr} vom ${fmtD(b.datum)}.`, schluss: '', zahlungsbedingungen: bezahlt(b) > 0 ? `Bereits gezahlte ${eur(bezahlt(b))} werden erstattet bzw. verrechnet.` : '', abzuege: b.abzuege, kleinunternehmer: b.kleinunternehmer });
+  Object.assign(s, { bezugId: b.id, bezugNr: b.nr, datum: today(), einleitung: `Hiermit stornieren wir die Rechnung ${b.nr} vom ${fmtD(b.datum)}.${grund ? ` Grund: ${grund}.` : ''}`, schluss: '', stornoGrund: grund || '', leistungVon: b.leistungVon || b.datum, leistungBis: b.leistungBis || b.leistungVon || b.datum, zahlungsbedingungen: bezahlt(b) > 0 ? `Bereits gezahlte ${eur(bezahlt(b))} werden erstattet bzw. verrechnet.` : '', abzuege: b.abzuege, kleinunternehmer: b.kleinunternehmer });
   s.nr = nextNummer('rechnung', s.datum); s.fest = true; s.festAm = new Date().toISOString(); s.festVon = S.user ? S.user.name : cfg().inhaber; s.status = 'offen';
   s.hash = await sha256(JSON.stringify({ nr: s.nr, positionen: s.positionen }));
   if (s.abzuege && s.abzuege.length) s.typ = 'storno';
   DB.put('belege', s);
   if (b.lagerGebucht) (b.positionen || []).forEach(p => { const a = get('artikel', p.artikelId); if (a && a.typ === 'verkauf' && a.herkunft !== 'zumiete') lagerBuchung(a.id, nz(p.menge), 'korrektur', 'Storno', s.nr); });
-  b.status = 'storniert'; b.stornoId = s.id; b.stornoNr = s.nr; DB.put('belege', b);
-  audit('storniert', `${typLabel(b.typ)} ${b.nr}`, `Storno ${s.nr}`);
+  b.status = 'storniert'; b.stornoId = s.id; b.stornoNr = s.nr; b.stornoAm = s.datum; if (grund) b.stornoGrund = grund; DB.put('belege', b);
+  audit('storniert', `${typLabel(b.typ)} ${b.nr}`, `Storno ${s.nr}${grund ? ' · ' + grund : ''}`);
   S.edit = null;
   if (korr) { const k = belegKopie(b, 'korrektur', { bezugId: b.id, bezugNr: b.nr, einleitung: `Diese Rechnung ersetzt die stornierte Rechnung ${b.nr} vom ${fmtD(b.datum)}.`, zahlungsbedingungen: b.zahlungsbedingungen, schluss: b.schluss, abzuege: b.abzuege }); DB.put('belege', k); toast('Storno erstellt – bitte die Korrekturrechnung bearbeiten und festschreiben.'); go('belege', { id: k.id }); }
   else { toast(`Stornorechnung ${s.nr} erstellt.`); go('belege', { id: s.id }); }
 }
-A.bkorrektur = () => { const b = clone(get('belege', curBeleg().id)); confirmBox(`Korrekturrechnung zu ${esc(b.nr)} erstellen? Die Rechnung wird dazu storniert und als neuer Entwurf kopiert.`, 'Weiter', () => stornieren(b, true), false); };
+A.bkorrektur = () => stornoDialog(true);
 A.bmahnen = () => {
   const b = get('belege', curBeleg().id); const c = cfg(); const stufe = Math.min((b.mahnungen || []).length, c.mahnung.stufen.length - 1); const st = c.mahnung.stufen[stufe];
   const tage = Math.max(0, diffDays(b.faellig, today())); const k = empf(b); const satz = r2(nz(c.mahnung.basiszins) + (k && k.b2b ? 9 : 5));
@@ -4266,7 +4292,7 @@ VIEWS.auswertung = () => {
   const bar = `<div class="bar"><select class="inp" style="max-width:110px" data-fsel="ay" aria-label="Jahr">${jahre.map(j => `<option ${String(y) === j ? 'selected' : ''}>${j}</option>`).join('')}</select></div>`;
   return page('Auswertung', 'Umsatz und Vermietstatistik', '', tabs('ausw', [['umsatz', 'Umsatz'], ['vermietung', 'Vermietstatistik'], ['entscheidung', 'Kaufen & Verkaufen']], tab) + bar + (tab === 'umsatz' ? umsatzView(y) : tab === 'vermietung' ? vermietView(y) : entscheidView(y)));
 };
-function umsatzDaten(y) { const rech = all('belege').filter(b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert' && (b.datum || '').startsWith(String(y))); const mon = new Array(12).fill(0); const kunden = {}, kats = {}, artk = {}, arts = {}; rech.forEach(b => { const s = belegSummen(b); mon[parseInt(b.datum.slice(5, 7), 10) - 1] += s.netto; kunden[b.kundeId] = (kunden[b.kundeId] || 0) + s.netto; kats[b.kategorie || 3] = (kats[b.kategorie || 3] || 0) + s.netto; const rg = 1 - nz(b.rabattGesamt) / 100; (b.positionen || []).forEach(p => { if (!istPosition(p) || (p.optional && !p.gewaehlt)) return; const a = get('artikel', p.artikelId); const k = a ? a.kategorie : p.typ === 'personal' ? 'Personal' : 'Sonstiges'; artk[k] = (artk[k] || 0) + posNetto(p) * rg; if (a) arts[a.id] = (arts[a.id] || 0) + posNetto(p) * rg; }); }); return { rech, mon, kunden, kats, artk, arts, total: sum(mon) }; }
+function umsatzDaten(y) { const rech = all('belege').filter(b => zaehltUmsatz(b) && (b.datum || '').startsWith(String(y))); const mon = new Array(12).fill(0); const kunden = {}, kats = {}, artk = {}, arts = {}; rech.forEach(b => { const s = belegSummen(b); mon[parseInt(b.datum.slice(5, 7), 10) - 1] += s.netto; kunden[b.kundeId] = (kunden[b.kundeId] || 0) + s.netto; kats[b.kategorie || 3] = (kats[b.kategorie || 3] || 0) + s.netto; const rg = 1 - nz(b.rabattGesamt) / 100; (b.positionen || []).forEach(p => { if (!istPosition(p) || (p.optional && !p.gewaehlt)) return; const a = get('artikel', p.artikelId); const k = a ? a.kategorie : p.typ === 'personal' ? 'Personal' : 'Sonstiges'; artk[k] = (artk[k] || 0) + posNetto(p) * rg; if (a) arts[a.id] = (arts[a.id] || 0) + posNetto(p) * rg; }); }); return { rech, mon, kunden, kats, artk, arts, total: sum(mon) }; }
 function umsatzView(y) {
   const d = umsatzDaten(y), v = umsatzDaten(y - 1); const diff = v.total ? r2((d.total - v.total) / v.total * 100) : null;
   const top = (o, name, n = 10) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, val]) => `<div class="li"><span class="grow t1">${esc(name(k))}</span><span class="num">${eur(val)}</span><span class="small muted" style="width:52px;text-align:right">${d.total ? numS(Math.round(val / d.total * 100)) : 0} %</span></div>`).join('') || empty('Keine Daten', '');
@@ -4541,7 +4567,7 @@ function navBadges() { const t = today(); return { belege: (all('belege').filter
 VIEWS.dashboard = () => {
   if (!canView('dashboard')) return VIEWS.meine();
   const t = today(); const mon = t.slice(0, 7); const pr = canPreise();
-  const rech = all('belege').filter(b => isRechnungTyp(b.typ) && b.fest && b.status !== 'storniert');
+  const rech = all('belege').filter(zaehltUmsatz);
   const umsM = sum(rech.filter(b => b.datum.startsWith(mon)), b => belegSummen(b).netto); const umsY = sum(rech.filter(b => b.datum.startsWith(t.slice(0, 4))), b => belegSummen(b).netto);
   const off = rech.filter(b => offen(b) > 0); const ue = off.filter(b => b.faellig < t);
   const ang = all('belege').filter(b => b.typ === 'angebot' && b.status === 'versendet');
@@ -4561,17 +4587,34 @@ A.notifon = () => { try { Notification.requestPermission().then(p => { toast(p =
 function pushErinnerung() { try { if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return; const er = erinnerungen().filter(x => x.sev !== 'info'); const key = 'ab:notif:' + today(); if (!er.length || lsGet(key, false)) return; new Notification('Showcase: ' + er.length + ' Erinnerungen', { body: er.slice(0, 3).map(x => x.t).join('\n') }); lsSet(key, true); } catch (e) { } }
 
 /* ============ Einstellungen ============ */
+// Startnummern – z. B. nach dem Wechsel von Excel: hier die nächste freie Nummer eintragen
+const NR_START = [['rechnung', 'Rechnungen', 'belege'], ['angebot', 'Angebote', 'belege'], ['auftrag', 'Auftragsbestätigungen', 'belege'], ['lieferschein', 'Lieferscheine', 'belege'], ['mahnung', 'Mahnungen', 'belege'], ['kunde', 'Kundennummern', 'kunden'], ['auftragNr', 'Veranstaltungen', 'auftraege']];
+function nrStartHtml(e) {
+  const zl = { ...(cfg().zaehler || {}), ...(e._nrSet || {}) };
+  const zeilen = NR_START.map(([k, l, coll]) => { const st = nrStand(k, today(), coll, e.nummern[k], zl); return `<tr><td><b>${l}</b>${st.max ? `<div class="small muted">zuletzt vergeben: ${esc(fmtNummer(st.fmt, st.max))}</div>` : ''}</td><td><input class="inp num" style="width:110px" inputmode="numeric" data-nrstart="${k}" data-coll="${coll}" value="${st.next}" aria-label="Nächste Nummer ${l}"></td><td class="mono" id="nrprev-${k}">${esc(fmtNummer(st.fmt, st.next))}</td></tr>`; }).join('');
+  return `<h4 style="margin:14px 0 4px">Nächste Nummer (Startwert, z. B. nach dem Wechsel von Excel)</h4><p class="small muted" style="margin:0 0 8px">War deine letzte Excel-Rechnung z. B. Nr. 46, trägst du bei Rechnungen <b>47</b> ein. Passe <b>zuerst</b> oben das Format an, damit die Nummern wie bisher aussehen (z. B. <span class="mono">{JJJJ}-{NNN}</span> für 2026-047). Kleiner als eine schon in Showcase vergebene Nummer geht nicht – doppelte Rechnungsnummern sind steuerlich unzulässig. Im neuen Jahr beginnt jeder Kreis automatisch wieder bei 1.</p><div class="tw"><table class="t"><thead><tr><th>Kreis</th><th>Nächste Nummer</th><th>Sieht dann so aus</th></tr></thead><tbody>${zeilen}</tbody></table></div>`;
+}
+function nrVorschau(e) { const zl = { ...(cfg().zaehler || {}), ...(e._nrSet || {}) }; NR_START.forEach(([k, , coll]) => { const el = $(`[data-nrstart="${k}"]`), pv = $('#nrprev-' + k); if (!el || !pv) return; const st = nrStand(k, today(), coll, e.nummern[k], zl); const v = parseInt(el.value, 10) || st.next; pv.textContent = fmtNummer(st.fmt, Math.max(v, st.max + 1)); }); }
+document.addEventListener('change', ev => {
+  const el = ev.target; const k = el.dataset && el.dataset.nrstart; if (!k || !S.edit || !S.edit._cfg) return;
+  const e = S.edit; const zl = { ...(cfg().zaehler || {}), ...(e._nrSet || {}) }; const st = nrStand(k, today(), el.dataset.coll, e.nummern[k], zl);
+  const v = parseInt(String(el.value).replace(/\D/g, ''), 10);
+  if (!v || v < 1) { toast('Bitte eine Zahl ab 1 eintragen.', 'bad'); el.value = st.next; return; }
+  if (v <= st.max) { toast(`${fmtNummer(st.fmt, st.max)} ist in Showcase schon vergeben – die nächste Nummer muss mindestens ${st.max + 1} sein.`, 'bad'); el.value = st.next; return; }
+  e._nrSet = { ...(e._nrSet || {}), [st.prefix]: v - 1 }; S.cfgDirty = true; const b = $('#cfgsave'); if (b) b.disabled = false;
+  const pv = $('#nrprev-' + k); if (pv) pv.textContent = fmtNummer(st.fmt, v); toast('Gemerkt – bitte oben „Einstellungen speichern“.');
+});
 VIEWS.einstellungen = () => {
   if (!isAdmin()) return page('Einstellungen', '', '', card('', empty('Nur für Admins', 'Bitte als Admin anmelden.')));
   const tab = curTab('einst', 'firma');
   if (!S.edit || !S.edit._cfg) { S.edit = clone(cfg()); S.edit._cfg = true; }
-  const e = S.edit; S.onEdit = () => { S.cfgDirty = true; const b = $('#cfgsave'); if (b) b.disabled = false; };
+  const e = S.edit; S.onEdit = (path) => { S.cfgDirty = true; const b = $('#cfgsave'); if (b) b.disabled = false; if (/^nummern\./.test(path || '')) nrVorschau(S.edit); };
   const tbs = [['firma', 'Firma'], ['belege', 'Belege & Texte'], ['preise', 'Preise & Mietfaktor'], ['steuer', 'Steuer & Konten'], ['mahnung', 'Mahnwesen'], ['listen', 'Listen'], ['fahrzeuge', 'Fahrzeuge'], ['stempel', 'Stempeluhr'], ['darstellung', 'Darstellung'], ['unterschrift', 'Unterschrift'], ['benutzer', 'Benutzer & Rechte'], ['onedrive', 'OneDrive-Abgleich'], ['daten', 'Daten & Sicherung'], ['protokoll', 'Protokoll'], ['hinweise', 'Hinweise']];
   let body = '';
   const L = (k, l, w = 'w6', o = {}) => fld(l, inp('e.' + k, getPath(e, k), o), w);
   if (tab === 'firma') body = card('Firmendaten (erscheinen auf allen Belegen)', `<div class="form">${L('name', 'Firmenname', 'w8')}${L('zusatz', 'Zusatz / Slogan', 'w4')}${L('inhaber', 'Inhaber', 'w6')}${L('strasse', 'Straße, Nr.', 'w6')}${L('plz', 'PLZ', 'w2')}${L('ort', 'Ort', 'w4')}${L('land', 'Land', 'w6')}${L('tel', 'Telefon', 'w4')}${L('email', 'E-Mail', 'w4')}${L('web', 'Website', 'w4')}${L('instagram', 'Instagram', 'w4', { placeholder: 'z. B. vt_marcel.brommer' })}<h4>Steuer & Bank</h4>${L('steuernr', 'Steuernummer', 'w4')}${L('ustid', 'USt-IdNr.', 'w4')}${L('finanzamt', 'Finanzamt', 'w4')}${L('bank', 'Bank', 'w4')}${L('iban', 'IBAN', 'w4')}${L('bic', 'BIC', 'w4')}${L('kontoinhaber', 'Kontoinhaber', 'w6')}<h4>Layout</h4><div class="w4 fld"><span>Logo (wird als JPEG gespeichert)</span>${e.logo ? `<img src="${e.logo}" alt="Logo" style="max-height:70px;max-width:220px;background:#fff;padding:4px;border:1px solid var(--line);border-radius:6px">` : '<span class="small muted">kein Logo</span>'}<div class="bar"><label class="btn sm">Logo wählen<input type="file" accept="image/*" data-file="logo" hidden></label>${e.logo ? btn('Entfernen', 'logorm', {}, 'sm ghost') : ''}</div></div>${fld('Akzentfarbe Belege', `<input class="inp" type="color" data-b="e.farbe" value="${esc(e.farbe || '#1C232C')}" style="height:38px">`, 'w2')}${fld('Zusätzliche Fußzeile', inp('e.fusszeile', e.fusszeile, { placeholder: 'z. B. Handelsregister, Gerichtsstand' }), 'w6')}</div>`) +
     card('Briefbogen (Layout aller Dokumente)', `<p class="small muted" style="margin-top:0">Nach deiner Vorlage: Logo oben, darunter der Inhalt, unten die dreispaltige Fußzeile mit Adresse · Kontakt/Instagram/Steuernummer · Bank. Gilt für Angebote, Rechnungen, Mahnungen, Lieferscheine, Briefe, Skizzen und Listen.</p><div class="form">${fld('Logo-Breite (mm)', inp('e.logoBreite', e.logoBreite, { t: 'num' }), 'w3', 'Vorlage: 63 mm')}${fld('Logo-Position', sel('e.logoPos', e.logoPos || 'rechts', [['rechts', 'rechts'], ['mitte', 'mittig'], ['links', 'links']]), 'w3')}${fld('Abstand oben (mm)', inp('e.logoOben', e.logoOben, { t: 'num' }), 'w3')}${fld('Linker Rand (mm)', inp('e.randLinks', e.randLinks, { t: 'num' }), 'w3', 'DIN 5008: 25 mm')}<div class="w12">${chk('e.logoFolgeGross', e.logoFolgeGross, 'Logo auch auf Folgeseiten in voller Größe (sonst verkleinert mit Titelzeile)')}</div></div><div class="bar" style="margin-top:10px">${btn(ic('eye') + 'Briefbogen-Vorschau', 'bbvorschau')}</div>`);
-  else if (tab === 'belege') body = card('Seitenlayout (DIN A4)', `<p class="small muted" style="margin-top:0">Alle Dokumente – Angebote, Rechnungen, Mahnungen, Lieferscheine, Listen und Etiketten – werden als DIN-A4-Seiten (210 × 297 mm) erzeugt. Briefe folgen DIN 5008 (Form B, Anschriftfeld passend für Fensterumschläge DIN lang).</p><div class="form"><div class="w12">${chk('e.uebertrag', e.uebertrag !== false, 'Übertrag am Seitenende und auf der Folgeseite anzeigen, wenn Positionen auf mehrere Seiten gehen')}</div><div class="w12">${chk('e.falzmarken', e.falzmarken !== false, 'Falzmarken (105 mm / 210 mm) und Lochmarke (148,5 mm) am linken Rand drucken')}</div></div><p class="small muted">Seitenumbrüche, Zwischensummen und „Überschrift auf neuer Seite“ stellst du direkt im Beleg ein.</p>`) + card('Nummernkreise', `<div class="form">${[['angebot', 'Angebote'], ['auftrag', 'Auftragsbestätigungen'], ['rechnung', 'Rechnungen (inkl. Storno/Abschlag)'], ['lieferschein', 'Lieferscheine'], ['mahnung', 'Mahnungen'], ['mietanfrage', 'Anfragen an Partner'], ['bestellung', 'Bestellungen'], ['kunde', 'Kundennummern'], ['artikel', 'Artikelnummern'], ['auftragNr', 'Veranstaltungen']].map(([k, l]) => fld(l, inp('e.nummern.' + k, e.nummern[k]), 'w4', 'Beispiel: ' + fmtNummer(e.nummern[k] || '', 1))).join('')}<div class="w12 small muted">Platzhalter: {JJJJ} Jahr, {JJ} kurzes Jahr, {MM} Monat, {NNN} laufende Nummer (Anzahl N = Stellen). Die Nummer zählt pro Präfix (also pro Jahr) hoch.</div>${fld('Zahlungsziel (Tage)', inp('e.zahlungsziel', e.zahlungsziel, { t: 'int' }), 'w4')}${fld('Angebote gültig (Tage)', inp('e.angebotGueltig', e.angebotGueltig, { t: 'int' }), 'w4')}${fld('Warenausgang Verkaufsartikel', sel('e.lagerAusgangBei', e.lagerAusgangBei, [['rechnung', 'beim Festschreiben der Rechnung (oder Lieferschein)']]), 'w4')}</div>`) +
+  else if (tab === 'belege') body = card('Seitenlayout (DIN A4)', `<p class="small muted" style="margin-top:0">Alle Dokumente – Angebote, Rechnungen, Mahnungen, Lieferscheine, Listen und Etiketten – werden als DIN-A4-Seiten (210 × 297 mm) erzeugt. Briefe folgen DIN 5008 (Form B, Anschriftfeld passend für Fensterumschläge DIN lang).</p><div class="form"><div class="w12">${chk('e.uebertrag', e.uebertrag !== false, 'Übertrag am Seitenende und auf der Folgeseite anzeigen, wenn Positionen auf mehrere Seiten gehen')}</div><div class="w12">${chk('e.falzmarken', e.falzmarken !== false, 'Falzmarken (105 mm / 210 mm) und Lochmarke (148,5 mm) am linken Rand drucken')}</div></div><p class="small muted">Seitenumbrüche, Zwischensummen und „Überschrift auf neuer Seite“ stellst du direkt im Beleg ein.</p>`) + card('Nummernkreise', `<div class="form">${[['angebot', 'Angebote'], ['auftrag', 'Auftragsbestätigungen'], ['rechnung', 'Rechnungen (inkl. Storno/Abschlag)'], ['lieferschein', 'Lieferscheine'], ['mahnung', 'Mahnungen'], ['mietanfrage', 'Anfragen an Partner'], ['bestellung', 'Bestellungen'], ['kunde', 'Kundennummern'], ['artikel', 'Artikelnummern'], ['auftragNr', 'Veranstaltungen']].map(([k, l]) => fld(l, inp('e.nummern.' + k, e.nummern[k]), 'w4', 'Beispiel: ' + fmtNummer(e.nummern[k] || '', 1))).join('')}<div class="w12 small muted">Platzhalter: {JJJJ} Jahr, {JJ} kurzes Jahr, {MM} Monat, {NNN} laufende Nummer (Anzahl N = Stellen). Die Nummer zählt pro Präfix (also pro Jahr) hoch.</div><div class="w12" id="nrstart">${nrStartHtml(e)}</div>${fld('Zahlungsziel (Tage)', inp('e.zahlungsziel', e.zahlungsziel, { t: 'int' }), 'w4')}${fld('Angebote gültig (Tage)', inp('e.angebotGueltig', e.angebotGueltig, { t: 'int' }), 'w4')}${fld('Warenausgang Verkaufsartikel', sel('e.lagerAusgangBei', e.lagerAusgangBei, [['rechnung', 'beim Festschreiben der Rechnung (oder Lieferschein)']]), 'w4')}</div>`) +
     card('Textbausteine', `<div class="tw"><table class="t"><thead><tr><th>Belegart</th><th>Verwendung</th><th>Name</th><th>Text</th><th></th></tr></thead><tbody>${e.texte.map((t, i) => `<tr><td>${sel(`e.texte.${i}.typ`, t.typ, [['alle', 'alle'], ['angebot', 'Angebot'], ['auftrag', 'Auftragsbest.'], ['rechnung', 'Rechnung'], ['lieferschein', 'Lieferschein'], ['mietanfrage', 'Anfrage Partner'], ['bestellung', 'Bestellung']], { cls: 'sm' })}</td><td>${sel(`e.texte.${i}.art`, t.art, [['einleitung', 'Einleitung'], ['schluss', 'Schluss/Zahlung'], ['agb', 'Hinweise/AGB']], { cls: 'sm' })}</td><td>${inp(`e.texte.${i}.name`, t.name, { cls: 'sm' })}</td><td style="min-width:300px">${txt(`e.texte.${i}.text`, t.text, { rows: 2 })}</td><td>${btn('×', 'cfglistdel', { 'data-k': 'texte', 'data-i': i }, 'ghost sm')}</td></tr>`).join('')}</tbody></table></div>${btn('+ Textbaustein', 'cfglistadd', { 'data-k': 'texte', 'data-tpl': JSON.stringify({ typ: 'alle', art: 'einleitung', name: 'Neu', text: '' }) }, 'sm')}<p class="small muted">Platzhalter: {FAELLIG} {NR} {DATUM} {BETRAG} {FIRMA} {INHABER}. Der jeweils erste Baustein pro Belegart wird bei neuen Belegen automatisch eingesetzt.</p>`) +
     card('E-Mail-Vorlage', `<div class="form">${fld('Betreff', inp('e.mail.betreff', e.mail.betreff), 'w12')}${fld('Text', txt('e.mail.text', e.mail.text, { rows: 8 }), 'w12', 'Platzhalter: {TYP} {NR} {FIRMA} {INHABER} {TEL} {ANREDE} {UNSER}')}</div>`);
   else if (tab === 'preise') body = card('Preiskategorien', `<div class="form">${[0, 1, 2, 3, 4].map(i => fld(`Kategorie ${i + 1}${i === 0 ? ' (günstig)' : i === 4 ? ' (teuer)' : ''}`, inp(`e.preisKat.${i}`, e.preisKat[i]), 'w4')).join('')}</div><p class="small muted">Jeder Artikel hat 5 Preise. Jeder Kunde hat eine Standard-Kategorie, die im Angebot vorausgewählt und frei änderbar ist.</p>`) +
@@ -4592,7 +4635,7 @@ VIEWS.einstellungen = () => {
   const saveBar = ['firma', 'belege', 'preise', 'steuer', 'mahnung', 'listen', 'stempel', 'unterschrift'].includes(tab) ? `<div class="bar sticky" style="justify-content:flex-end">${btn('Änderungen verwerfen', 'cfgreset', {}, 'ghost')}<button class="btn pri" id="cfgsave" data-act="cfgsave">Einstellungen speichern</button></div>` : '';
   return page('Einstellungen', esc(cfg().name), '', tabs('einst', tbs, tab) + saveBar + body);
 };
-A.cfgsave = () => { const n = clone(S.edit); delete n._cfg; n.id = 'cfg'; $$('[data-listfield]').forEach(t => { n[t.dataset.listfield] = t.value.split('\n').map(s => s.trim()).filter(Boolean); }); DB.put('meta', n); S.cfgDirty = false; S.edit = null; audit('Einstellungen gespeichert', ''); const f = S.firmen.find(x => x.id === S.firma); if (f && f.name !== n.name && S.firmen.length <= 1) { f.name = n.name; Store.saveFirmen(); } toast('Einstellungen gespeichert.'); };
+A.cfgsave = () => { const n = clone(S.edit); delete n._cfg; n.zaehler = { ...(cfg().zaehler || {}), ...(n._nrSet || {}) }; delete n._nrSet; n.id = 'cfg'; $$('[data-listfield]').forEach(t => { n[t.dataset.listfield] = t.value.split('\n').map(s => s.trim()).filter(Boolean); }); DB.put('meta', n); S.cfgDirty = false; S.edit = null; audit('Einstellungen gespeichert', ''); const f = S.firmen.find(x => x.id === S.firma); if (f && f.name !== n.name && S.firmen.length <= 1) { f.name = n.name; Store.saveFirmen(); } toast('Einstellungen gespeichert.'); };
 document.addEventListener('input', e => { if (e.target.dataset && e.target.dataset.listfield && S.edit && S.edit._cfg) S.cfgDirty = true, S.edit[e.target.dataset.listfield] = e.target.value.split('\n').map(s => s.trim()).filter(Boolean); });
 A.cfgreset = () => { S.edit = null; S.cfgDirty = false; rerenderKeepScroll(); };
 A.cfglistadd = t => { S.cfgDirty = true; const l = getPath(S.edit, t.dataset.k); l.push(JSON.parse(t.dataset.tpl)); if (t.dataset.k === 'texte') l[l.length - 1].id = uid('t'); rerenderKeepScroll(); };
