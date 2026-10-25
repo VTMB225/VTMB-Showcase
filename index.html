@@ -193,6 +193,9 @@ select.inp{padding-right:4px}
 .umbruch{display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:600;color:var(--accent-text);text-transform:uppercase;letter-spacing:.06em}
 .umbruch::before,.umbruch::after{content:"";flex:1;border-top:2px dashed var(--accent)}
 .postab tr.umbruchrow td{background:var(--accent-soft)}
+.posaddbar{margin-top:12px;flex-wrap:wrap}
+.ctxmenu{position:fixed;z-index:1000;display:flex;flex-direction:column;align-items:stretch;gap:2px;min-width:200px;padding:8px;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.18)}
+.ctxmenu .small{padding:2px 8px 4px}.ctxmenu .btn{justify-content:flex-start;border:0}
 .leerz{font-size:12px;color:var(--muted);text-align:center;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);padding:3px 0}
 .postab tr.zwsrow td{background:var(--surface2);border-top:2px solid var(--line)}
 .paperwrap{background:var(--surface2);padding:16px;border-radius:8px;overflow-x:auto}
@@ -2402,13 +2405,35 @@ function belegEditor() {
   return `<div class="page"><div class="phead"><div><div class="bar">${btn(ic('back'), 'go', { 'data-v': 'belege', 'aria-label': 'Zurück' }, 'ghost sm')}<h1>${esc(typLabel(b.typ))} ${esc(b.nr || '')}${b.typ === 'angebot' ? ` <span class="muted" style="font-size:.7em">V${b.version || 1}</span>` : ''}</h1>${pill(st[0], st[1])}</div><div class="sub" id="savestate">Entwurf – wird automatisch gespeichert</div></div>
     <div class="acts">${btn(ic('eye') + 'Vorschau', 'bvorschau')}${btn(ic('dl') + 'PDF', 'bpdf')}${btn(ic('mail') + 'Senden', 'bmail')}${belegAktionen(b)}</div></div>
     ${b.anfrage ? `<div class="note info"><b>Online-Anfrage</b> vom ${fmtD((b.anfrage.t || '').slice(0, 10))}${b.anfrage.ort ? ' · Ort: ' + esc(b.anfrage.ort) : ''}${b.anfrage.anlass ? ' · Anlass: ' + esc(b.anfrage.anlass) : ''}${b.anfrage.nachricht ? `<br><i>„${esc(b.anfrage.nachricht)}“</i>` : ''}</div>` : ''}${vers}${card('Kopf', kopf + mietTageBereich(b, partnerDoc))}${card('', einl)}
-    ${card('Positionen', posTab + verf, `${btn('+ Artikel', 'posartikel', {}, 'sm pri')}${btn('+ Personal', 'pospersonal', {}, 'sm')}${btn('+ Freie Position', 'posadd', { 'data-typ': 'frei' }, 'sm')}${btn('+ Text', 'posadd', { 'data-typ': 'text' }, 'sm')}${btn('+ Überschrift', 'posadd', { 'data-typ': 'titel' }, 'sm')}${b.typ !== 'lieferschein' && pr ? btn('+ Zwischensumme', 'posadd', { 'data-typ': 'zwischensumme' }, 'sm') : ''}${btn('+ Leerzeile', 'posadd', { 'data-typ': 'leer' }, 'sm')}${btn('+ Seitenumbruch', 'posadd', { 'data-typ': 'umbruch' }, 'sm')}${b.auftragId ? btn('Aus Veranstaltung', 'posauftrag', {}, 'sm') : ''}`)}
+    ${card('Positionen', (b.positionen || []).length ? posTab + `<div class="bar posaddbar">${posAddBar(b, pr)}</div><div class="small muted">Tipp: Rechtsklick auf eine Position, um direkt darunter etwas einzufügen.</div>` + verf : posTab + verf, posAddBar(b, pr))}
     ${abz}
     <div class="grid g2">${card('Optionen', `<div class="form">${partnerDoc ? '' : fld('Gesamtrabatt %', inp('e.rabattGesamt', b.rabattGesamt, { t: 'num' }), 'w3') + fld('Gesamtrabatt €', `<input class="inp num" id="rabatteuro" data-rabatteuro inputmode="decimal" value="${num(belegSummen(b).rabattBetrag)}" aria-label="Rabatt auf Gesamt in Euro">`, 'w3', '% wird berechnet')}<div class="w6" style="align-self:end">${chk('e.kleinunternehmer', b.kleinunternehmer, 'Kleinunternehmer (§ 19 UStG)')}</div>${b.typ === 'lieferschein' ? `<div class="w12">${chk('e.lieferadresse', b.lieferadresse, 'Lieferadresse des Kunden verwenden')}</div>` : ''}<h4>Seitenaufteilung (DIN A4)</h4><div class="w12">${chk('e.titelNeueSeite', b.titelNeueSeite, 'Jede Überschrift auf einer neuen Seite beginnen')}</div><div class="w12">${chk('e.schlussNeueSeite', b.schlussNeueSeite, 'Zahlungs- und Schlusstext auf eine neue Seite')}</div><div class="w12 small muted" id="seitenzahl">${seitenText(b)}</div><h4>Unterschrift</h4>${fld('Meine Unterschrift einsetzen', sel('e.signModus', b.signModus || '', [['', `automatisch (${(cfg().signTypen || []).includes(nrArt(b.typ)) ? 'ja' : 'nein'} laut Einstellung)`], ['ja', 'ja'], ['nein', 'nein']]), 'w12', cfg().unterschrift ? '' : 'Noch keine Unterschrift hinterlegt – Einstellungen › Unterschrift.')}</div>${pr && !partnerDoc ? `<div id="kalkbox" style="margin-top:12px">${kalkBox(b)}</div>` : ''}`)}${pr ? card('Summe', sumHtml) : ''}</div>
     ${card('', schluss)}
     <div class="bar" style="justify-content:flex-end">${btn('Entwurf löschen', 'bdel', {}, 'danger')}${isRechnungTyp(b.typ) ? btn(ic('lock') + 'Festschreiben', 'bfest', {}, 'pri') : b.typ === 'angebot' ? btn('Als versendet markieren', 'bversendet', {}, 'pri') : ['lieferschein'].includes(b.typ) ? btn('Ausliefern & festschreiben', 'blsfest', {}, 'pri') : ''}</div>
   </div>`;
 }
+function posAddBar(b, pr, at) {
+  const o = at === undefined ? {} : { 'data-at': at }; const k = at === undefined ? 'sm' : 'ghost sm';
+  return `${btn('+ Artikel', 'posartikel', o, at === undefined ? 'sm pri' : k)}${btn('+ Personal', 'pospersonal', o, k)}${btn('+ Freie Position', 'posadd', { ...o, 'data-typ': 'frei' }, k)}${btn('+ Text', 'posadd', { ...o, 'data-typ': 'text' }, k)}${btn('+ Überschrift', 'posadd', { ...o, 'data-typ': 'titel' }, k)}${b.typ !== 'lieferschein' && pr ? btn('+ Zwischensumme', 'posadd', { ...o, 'data-typ': 'zwischensumme' }, k) : ''}${btn('+ Leerzeile', 'posadd', { ...o, 'data-typ': 'leer' }, k)}${btn('+ Seitenumbruch', 'posadd', { ...o, 'data-typ': 'umbruch' }, k)}${b.auftragId && at === undefined ? btn('Aus Veranstaltung', 'posauftrag', {}, k) : ''}`;
+}
+// Neue Positionen am Ende oder – nach Rechtsklick-Menü – an der gewählten Stelle einfügen
+const posZiel = t => { S.posInsert = t && t.dataset && t.dataset.at !== undefined ? +t.dataset.at : null; ctxClose(); };
+function posEinfuegen(b, p) { if (S.posInsert === null || S.posInsert === undefined || S.posInsert > b.positionen.length) b.positionen.push(p); else b.positionen.splice(S.posInsert++, 0, p); }
+function ctxClose() { const m = $('#ctxmenu'); if (m) m.remove(); }
+document.addEventListener('contextmenu', e => {
+  const tr = e.target.closest && e.target.closest('.postab tbody tr'); if (!tr || !S.edit || !S.edit._beleg || S.edit.fest) return;
+  if (e.target.closest('input, textarea, select')) return; // dort bleibt das normale Menü (Kopieren/Einfügen)
+  const h = tr.querySelector('[data-drag]'); if (!h) return;
+  e.preventDefault(); ctxClose();
+  const m = document.createElement('div'); m.id = 'ctxmenu'; m.className = 'ctxmenu'; m.setAttribute('role', 'menu');
+  m.innerHTML = `<div class="small muted">Darunter einfügen</div>${posAddBar(S.edit, canPreise(), +h.dataset.drag + 1)}`;
+  document.body.appendChild(m);
+  const r = m.getBoundingClientRect(); m.style.left = Math.max(8, Math.min(e.clientX, innerWidth - r.width - 8)) + 'px'; m.style.top = Math.max(8, Math.min(e.clientY, innerHeight - r.height - 8)) + 'px';
+  m.querySelector('button')?.focus();
+});
+document.addEventListener('mousedown', e => { if (!e.target.closest || !e.target.closest('#ctxmenu')) ctxClose(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') ctxClose(); });
+window.addEventListener('scroll', ctxClose, true);
 function positionenTabelle(b, partnerDoc) {
   const pr = canPreise(); const showTage = (b.positionen || []).some(p => p.miete); const showKg = b.typ === 'lieferschein';
   if (!(b.positionen || []).length) return empty('Noch keine Positionen', 'Füge Artikel aus deinem Lager, Zumiet-Artikel, Personal oder freie Positionen hinzu.');
@@ -2462,7 +2487,7 @@ document.addEventListener('change', e => { const el = e.target; if (el.dataset.a
 function belegChanged() { autosave(); rerenderKeepScroll(); }
 function seitenText(b) { const n = belegSeitenzahl(b); return n ? `Umfang: ${n} Seite${n === 1 ? '' : 'n'} DIN A4 · Seitenumbrüche setzt du mit „+ Seitenumbruch“ zwischen den Positionen.` : ''; }
 const seitenUpdate = debounce(() => { const el = $('#seitenzahl'); if (el && S.edit && S.edit._beleg) el.textContent = seitenText(S.edit); }, 500);
-A.posadd = t => { const typ = t.dataset.typ; const b = S.edit; if (typ === 'umbruch' || typ === 'leer' || typ === 'zwischensumme') { b.positionen.push(typ !== 'zwischensumme' ? { id: uid('p'), typ } : { id: uid('p'), typ, text: '' }); belegChanged(); return; } b.positionen.push(typ === 'frei' ? { id: uid('p'), typ: 'frei', text: '', beschreibung: '', menge: 1, einheit: 'Stk', ep: 0, ek: 0, rabatt: 0, steuer: b.kleinunternehmer ? 0 : nz(cfg().ustSatz), manuell: true } : { id: uid('p'), typ, text: '' }); belegChanged(); };
+A.posadd = t => { posZiel(t); const typ = t.dataset.typ; const b = S.edit; if (typ === 'umbruch' || typ === 'leer' || typ === 'zwischensumme') { posEinfuegen(b, typ !== 'zwischensumme' ? { id: uid('p'), typ } : { id: uid('p'), typ, text: '' }); belegChanged(); return; } posEinfuegen(b, typ === 'frei' ? { id: uid('p'), typ: 'frei', text: '', beschreibung: '', menge: 1, einheit: 'Stk', ep: 0, ek: 0, rabatt: 0, steuer: b.kleinunternehmer ? 0 : nz(cfg().ustSatz), manuell: true } : { id: uid('p'), typ, text: '' }); belegChanged(); };
 A.posdel = t => { S.edit.positionen.splice(+t.dataset.i, 1); belegChanged(); };
 A.posdup = t => { const i = +t.dataset.i; const p = clone(S.edit.positionen[i]); p.id = uid('p'); S.edit.positionen.splice(i + 1, 0, p); belegChanged(); };
 /* Positionen mit gedrückter Maus (oder Finger) verschieben */
@@ -2499,7 +2524,7 @@ A.zumietvorschlag = t => {
 };
 
 /* Artikel-Auswahl */
-A.posartikel = () => { S.medit = { q: '', tab: 'eigen', menge: {} }; openModal({ title: 'Artikel hinzufügen', size: 'wide', body: pickerBody, foot: () => btn('Fertig', 'mclose', {}, 'pri') }); setTimeout(() => $('#pickq')?.focus(), 30); };
+A.posartikel = t => { posZiel(t); S.medit = { q: '', tab: 'eigen', menge: {} }; openModal({ title: 'Artikel hinzufügen', size: 'wide', body: pickerBody, foot: () => btn('Fertig', 'mclose', {}, 'pri') }); setTimeout(() => $('#pickq')?.focus(), 30); };
 function pickerBody() {
   const m = S.medit; const b = S.edit; const q = (m.q || '').toLowerCase(); const d1 = b.leistungVon, d2 = b.leistungBis || b.leistungVon;
   const l = all('artikel').filter(a => !a.archiv && (m.tab === 'zumiete' ? a.herkunft === 'zumiete' : m.tab === 'leistung' ? a.typ === 'dienstleistung' : a.herkunft !== 'zumiete' && a.typ !== 'dienstleistung') && (!q || `${a.nr} ${a.name} ${a.gruppe || ''} ${a.kategorie}`.toLowerCase().includes(q))).sort(by(a => a.kategorie + a.name)).slice(0, 150);
@@ -2510,9 +2535,9 @@ function pickerBody() {
 }
 document.addEventListener('input', e => { if (e.target.dataset && e.target.dataset.pickq !== undefined) { S.medit.q = e.target.value; const pos = e.target.selectionStart; renderModal(); const n = $('#pickq'); n.focus(); n.setSelectionRange(pos, pos); } });
 A.picktab = t => { S.medit.tab = t.dataset.v; renderModal(); };
-A.pickadd = t => { const a = get('artikel', t.dataset.id); const menge = parseNum($('#pm-' + a.id)?.value || 1) || 1; S.edit.positionen.push(posVonArtikel(a, S.edit, menge)); autosave(); toast(`${numS(menge)} × ${a.name} hinzugefügt.`); render(); };
-A.pospersonal = () => { S.medit = { personId: '', stunden: 8, rolle: '' }; openModal({ title: 'Personal als Position', size: 'narrow', body: () => `<div class="form">${fld('Person', sel('m.personId', S.medit.personId, opts(active('personen').filter(p => p.art !== 'platzhalter').sort(by(p => p.name)), p => `${p.name} (${{ fest: 'fest', aushilfe: 'Aushilfe', fremd: 'Fremd' }[p.art] || ''})`, '– wählen –'), { 'data-rr': '' }), 'w12')}${fld('Rolle / Bezeichnung', `<input class="inp" data-b="m.rolle" list="rlist" value="${esc(S.medit.rolle)}"><datalist id="rlist">${cfg().rollen.map(r => `<option value="${esc(r)}">`).join('')}</datalist>`, 'w8')}${fld('Stunden', inp('m.stunden', S.medit.stunden, { t: 'num' }), 'w4')}<div class="w12 small muted">Preis kommt aus den Personal-Verkaufspreisen der Person (Kategorie 1–5). Alternativ eine Leistung (z. B. „Techniker Tagessatz“) als Artikel anlegen.</div></div>`, foot: () => btn('Abbrechen', 'mclose') + btn('Hinzufügen', 'pospersok', {}, 'pri') }); };
-A.pospersok = () => { const pe = get('personen', S.medit.personId); if (!pe) { toast('Bitte Person wählen.', 'bad'); return; } S.edit.positionen.push(posVonPerson(pe, S.edit, nz(S.medit.stunden), S.medit.rolle)); closeModal(); belegChanged(); };
+A.pickadd = t => { const a = get('artikel', t.dataset.id); const menge = parseNum($('#pm-' + a.id)?.value || 1) || 1; posEinfuegen(S.edit, posVonArtikel(a, S.edit, menge)); autosave(); toast(`${numS(menge)} × ${a.name} hinzugefügt.`); render(); };
+A.pospersonal = t => { posZiel(t); S.medit = { personId: '', stunden: 8, rolle: '' }; openModal({ title: 'Personal als Position', size: 'narrow', body: () => `<div class="form">${fld('Person', sel('m.personId', S.medit.personId, opts(active('personen').filter(p => p.art !== 'platzhalter').sort(by(p => p.name)), p => `${p.name} (${{ fest: 'fest', aushilfe: 'Aushilfe', fremd: 'Fremd' }[p.art] || ''})`, '– wählen –'), { 'data-rr': '' }), 'w12')}${fld('Rolle / Bezeichnung', `<input class="inp" data-b="m.rolle" list="rlist" value="${esc(S.medit.rolle)}"><datalist id="rlist">${cfg().rollen.map(r => `<option value="${esc(r)}">`).join('')}</datalist>`, 'w8')}${fld('Stunden', inp('m.stunden', S.medit.stunden, { t: 'num' }), 'w4')}<div class="w12 small muted">Preis kommt aus den Personal-Verkaufspreisen der Person (Kategorie 1–5). Alternativ eine Leistung (z. B. „Techniker Tagessatz“) als Artikel anlegen.</div></div>`, foot: () => btn('Abbrechen', 'mclose') + btn('Hinzufügen', 'pospersok', {}, 'pri') }); };
+A.pospersok = () => { const pe = get('personen', S.medit.personId); if (!pe) { toast('Bitte Person wählen.', 'bad'); return; } posEinfuegen(S.edit, posVonPerson(pe, S.edit, nz(S.medit.stunden), S.medit.rolle)); closeModal(); belegChanged(); };
 function abzugAuswahl(b) {
   const ab = all('belege').filter(x => x.typ === 'abschlag' && x.fest && x.status !== 'storniert' && x.kundeId === b.kundeId && (!b.auftragId || x.auftragId === b.auftragId));
   return card('Abschlagsrechnungen verrechnen', ab.length ? `<div class="list">${ab.map(x => `<label class="li chk"><input type="checkbox" data-act="abzug" data-id="${x.id}" ${(b.abzuege || []).includes(x.id) ? 'checked' : ''}><span class="grow">${esc(x.nr)} vom ${fmtD(x.datum)}</span><span class="num">${eur(belegSummen(x).brutto)}</span></label>`).join('')}</div>` : empty('Keine Abschlagsrechnungen', 'Für diesen Kunden / diese Veranstaltung gibt es keine festgeschriebenen Abschlagsrechnungen.'), '', true);
