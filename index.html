@@ -193,6 +193,7 @@ select.inp{padding-right:4px}
 .umbruch{display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:600;color:var(--accent-text);text-transform:uppercase;letter-spacing:.06em}
 .umbruch::before,.umbruch::after{content:"";flex:1;border-top:2px dashed var(--accent)}
 .postab tr.umbruchrow td{background:var(--accent-soft)}
+.leerz{font-size:12px;color:var(--muted);text-align:center;border-top:1px dashed var(--line);border-bottom:1px dashed var(--line);padding:3px 0}
 .postab tr.zwsrow td{background:var(--surface2);border-top:2px solid var(--line)}
 .paperwrap{background:var(--surface2);padding:16px;border-radius:8px;overflow-x:auto}
 /* calendar */
@@ -1231,7 +1232,7 @@ function artikelPreis(a, kat) {
 }
 const personVK = (pe, kat) => artikelPreis({ preise: pe.vk || [] }, kat);
 const isRechnungTyp = t => RE_TYPEN.includes(t);
-const SONDERZEILEN = ['text', 'titel', 'umbruch', 'zwischensumme'];
+const SONDERZEILEN = ['text', 'titel', 'umbruch', 'leer', 'zwischensumme'];
 const istPosition = p => !!p && !SONDERZEILEN.includes(p.typ);
 const isMietPos = p => p.miete && istPosition(p);
 function posFaktor(p) { return isMietPos(p) ? mietFaktor(p.tage || 1) : 1; }
@@ -1572,6 +1573,7 @@ function docModel(b) {
   const rows = []; let n = 0; const zws = zwsWerte(b.positionen);
   (b.positionen || []).forEach((p, i) => {
     if (p.typ === 'umbruch') { rows.push({ kind: 'umbruch' }); return; }
+    if (p.typ === 'leer') { rows.push({ kind: 'leer' }); return; }
     if (p.typ === 'titel') { rows.push({ kind: 'titel', text: p.text || '' }); return; }
     if (p.typ === 'text') { rows.push({ kind: 'text', text: p.text || '' }); return; }
     if (p.typ === 'zwischensumme') { if (prices) rows.push({ kind: 'zws', text: zws[i].label, betrag: zws[i].betrag }); return; }
@@ -1700,7 +1702,7 @@ function belegLayout(b) {
   const txtW = m.prices ? (R - 52 - 15) - (L + 9) : R - (mitKg ? 55 : 25) - (L + 9);
   const limit = () => BOTTOM - (uebertragAn && lauf ? 7 : 0);
   const tableHead = () => { p.text('Pos', col.pos, y, { size: 8.5, bold: true }); p.text('Bezeichnung', col.txt, y, { size: 8.5, bold: true }); p.text('Menge', col.menge, y, { size: 8.5, bold: true, align: 'right' }); if (m.prices) { p.text('Einzelpreis €', col.ep, y, { size: 8.5, bold: true, align: 'right' }); p.text('Gesamt €', col.ges, y, { size: 8.5, bold: true, align: 'right' }); } if (mitKg) p.text('Gewicht', col.kg, y, { size: 8.5, bold: true, align: 'right' }); y += 1.8; p.line(L, y, R, y, { w: .4 }); y += 4.2; tabStart = y; };
-  const rowH = r => { if (!r) return 0; if (r.kind === 'titel' || r.kind === 'zws') return 7; if (r.kind === 'text') return p.wrap(r.text, R - col.txt, 9.5).length * 4.3 + 1.5; if (r.kind === 'pos') return p.wrap(r.text, txtW, 9.5, true).length * 4.3 + (r.detail ? p.wrap(r.detail, txtW, 8.2).length * 3.7 : 0) + 2; return 0; };
+  const rowH = r => { if (!r) return 0; if (r.kind === 'titel' || r.kind === 'zws') return 7; if (r.kind === 'leer') return 6; if (r.kind === 'text') return p.wrap(r.text, R - col.txt, 9.5).length * 4.3 + 1.5; if (r.kind === 'pos') return p.wrap(r.text, txtW, 9.5, true).length * 4.3 + (r.detail ? p.wrap(r.detail, txtW, 8.2).length * 3.7 : 0) + 2; return 0; };
   const weitere = i => m.rows.slice(i + 1).some(r => r.kind !== 'umbruch');
   const umbrechen = mitTabelle => {
     const vorher = p.seite;
@@ -1717,6 +1719,8 @@ function belegLayout(b) {
     for (let i = i0; i < m.rows.length; i++) {
       const r = m.rows[i];
       if (r.kind === 'umbruch') { if (y > tabStart + .01) umbrechen(weitere(i)); continue; }
+      // Leerzeile: nicht am Seitenanfang und nicht, wenn sie nicht mehr auf die Seite passt
+      if (r.kind === 'leer') { if (y > tabStart + .01 && y + 6 <= limit()) y += 6; continue; }
       if (r.kind === 'titel') {
         const naechste = m.rows.slice(i + 1).find(x => x.kind !== 'umbruch');
         if (b.titelNeueSeite && y > tabStart + .01) umbrechen(true);
@@ -2398,7 +2402,7 @@ function belegEditor() {
   return `<div class="page"><div class="phead"><div><div class="bar">${btn(ic('back'), 'go', { 'data-v': 'belege', 'aria-label': 'Zurück' }, 'ghost sm')}<h1>${esc(typLabel(b.typ))} ${esc(b.nr || '')}${b.typ === 'angebot' ? ` <span class="muted" style="font-size:.7em">V${b.version || 1}</span>` : ''}</h1>${pill(st[0], st[1])}</div><div class="sub" id="savestate">Entwurf – wird automatisch gespeichert</div></div>
     <div class="acts">${btn(ic('eye') + 'Vorschau', 'bvorschau')}${btn(ic('dl') + 'PDF', 'bpdf')}${btn(ic('mail') + 'Senden', 'bmail')}${belegAktionen(b)}</div></div>
     ${b.anfrage ? `<div class="note info"><b>Online-Anfrage</b> vom ${fmtD((b.anfrage.t || '').slice(0, 10))}${b.anfrage.ort ? ' · Ort: ' + esc(b.anfrage.ort) : ''}${b.anfrage.anlass ? ' · Anlass: ' + esc(b.anfrage.anlass) : ''}${b.anfrage.nachricht ? `<br><i>„${esc(b.anfrage.nachricht)}“</i>` : ''}</div>` : ''}${vers}${card('Kopf', kopf + mietTageBereich(b, partnerDoc))}${card('', einl)}
-    ${card('Positionen', posTab + verf, `${btn('+ Artikel', 'posartikel', {}, 'sm pri')}${btn('+ Personal', 'pospersonal', {}, 'sm')}${btn('+ Freie Position', 'posadd', { 'data-typ': 'frei' }, 'sm')}${btn('+ Text', 'posadd', { 'data-typ': 'text' }, 'sm')}${btn('+ Überschrift', 'posadd', { 'data-typ': 'titel' }, 'sm')}${b.typ !== 'lieferschein' && pr ? btn('+ Zwischensumme', 'posadd', { 'data-typ': 'zwischensumme' }, 'sm') : ''}${btn('+ Seitenumbruch', 'posadd', { 'data-typ': 'umbruch' }, 'sm')}${b.auftragId ? btn('Aus Veranstaltung', 'posauftrag', {}, 'sm') : ''}`)}
+    ${card('Positionen', posTab + verf, `${btn('+ Artikel', 'posartikel', {}, 'sm pri')}${btn('+ Personal', 'pospersonal', {}, 'sm')}${btn('+ Freie Position', 'posadd', { 'data-typ': 'frei' }, 'sm')}${btn('+ Text', 'posadd', { 'data-typ': 'text' }, 'sm')}${btn('+ Überschrift', 'posadd', { 'data-typ': 'titel' }, 'sm')}${b.typ !== 'lieferschein' && pr ? btn('+ Zwischensumme', 'posadd', { 'data-typ': 'zwischensumme' }, 'sm') : ''}${btn('+ Leerzeile', 'posadd', { 'data-typ': 'leer' }, 'sm')}${btn('+ Seitenumbruch', 'posadd', { 'data-typ': 'umbruch' }, 'sm')}${b.auftragId ? btn('Aus Veranstaltung', 'posauftrag', {}, 'sm') : ''}`)}
     ${abz}
     <div class="grid g2">${card('Optionen', `<div class="form">${partnerDoc ? '' : fld('Gesamtrabatt %', inp('e.rabattGesamt', b.rabattGesamt, { t: 'num' }), 'w3') + fld('Gesamtrabatt €', `<input class="inp num" id="rabatteuro" data-rabatteuro inputmode="decimal" value="${num(belegSummen(b).rabattBetrag)}" aria-label="Rabatt auf Gesamt in Euro">`, 'w3', '% wird berechnet')}<div class="w6" style="align-self:end">${chk('e.kleinunternehmer', b.kleinunternehmer, 'Kleinunternehmer (§ 19 UStG)')}</div>${b.typ === 'lieferschein' ? `<div class="w12">${chk('e.lieferadresse', b.lieferadresse, 'Lieferadresse des Kunden verwenden')}</div>` : ''}<h4>Seitenaufteilung (DIN A4)</h4><div class="w12">${chk('e.titelNeueSeite', b.titelNeueSeite, 'Jede Überschrift auf einer neuen Seite beginnen')}</div><div class="w12">${chk('e.schlussNeueSeite', b.schlussNeueSeite, 'Zahlungs- und Schlusstext auf eine neue Seite')}</div><div class="w12 small muted" id="seitenzahl">${seitenText(b)}</div><h4>Unterschrift</h4>${fld('Meine Unterschrift einsetzen', sel('e.signModus', b.signModus || '', [['', `automatisch (${(cfg().signTypen || []).includes(nrArt(b.typ)) ? 'ja' : 'nein'} laut Einstellung)`], ['ja', 'ja'], ['nein', 'nein']]), 'w12', cfg().unterschrift ? '' : 'Noch keine Unterschrift hinterlegt – Einstellungen › Unterschrift.')}</div>${pr && !partnerDoc ? `<div id="kalkbox" style="margin-top:12px">${kalkBox(b)}</div>` : ''}`)}${pr ? card('Summe', sumHtml) : ''}</div>
     ${card('', schluss)}
@@ -2414,6 +2418,7 @@ function positionenTabelle(b, partnerDoc) {
     const del = `<button class="btn ghost sm" data-act="posdel" data-i="${i}" aria-label="Position löschen">${ic('trash')}</button>`;
     const X = (showTage ? 1 : 0) + (showKg ? 2 : 0) + (pr ? (partnerDoc ? 5 : 7) : 2) + 1;
     if (p.typ === 'umbruch') return `<tr class="umbruchrow"><td class="nowrap">${mv}</td><td></td><td colspan="${X}"><div class="umbruch" role="separator">Seitenumbruch – die folgenden Zeilen beginnen auf einer neuen DIN-A4-Seite</div></td><td></td><td>${del}</td></tr>`;
+    if (p.typ === 'leer') return `<tr class="leerrow"><td class="nowrap">${mv}</td><td></td><td colspan="${X}"><div class="leerz" role="separator">Leerzeile</div></td><td></td><td>${del}</td></tr>`;
     if (p.typ === 'zwischensumme') { const z = zwsWerte(b.positionen)[i] || { betrag: 0, label: 'Zwischensumme' }; return `<tr class="zwsrow"><td class="nowrap">${mv}</td><td></td><td colspan="${pr ? X - 1 : X}"><input class="inp b" data-b="e.positionen.${i}.text" value="${esc(p.text || '')}" placeholder="${esc(z.label)}" aria-label="Bezeichnung der Zwischensumme"></td>${pr ? `<td class="r num b" id="zs-${i}">${num(z.betrag)}</td>` : ''}<td></td><td>${del}</td></tr>`; }
     if (p.typ === 'text' || p.typ === 'titel') return `<tr class="textrow"><td class="nowrap">${mv}</td><td></td><td colspan="${X}">${p.typ === 'titel' ? `<input class="inp b" data-b="e.positionen.${i}.text" value="${esc(p.text)}" placeholder="Überschrift" aria-label="Überschrift">` : `<textarea class="inp" rows="1" data-b="e.positionen.${i}.text" placeholder="Hinweistext" aria-label="Text">${esc(p.text)}</textarea>`}</td><td></td><td>${del}</td></tr>`;
     n++; const a = get('artikel', p.artikelId);
@@ -2457,7 +2462,7 @@ document.addEventListener('change', e => { const el = e.target; if (el.dataset.a
 function belegChanged() { autosave(); rerenderKeepScroll(); }
 function seitenText(b) { const n = belegSeitenzahl(b); return n ? `Umfang: ${n} Seite${n === 1 ? '' : 'n'} DIN A4 · Seitenumbrüche setzt du mit „+ Seitenumbruch“ zwischen den Positionen.` : ''; }
 const seitenUpdate = debounce(() => { const el = $('#seitenzahl'); if (el && S.edit && S.edit._beleg) el.textContent = seitenText(S.edit); }, 500);
-A.posadd = t => { const typ = t.dataset.typ; const b = S.edit; if (typ === 'umbruch' || typ === 'zwischensumme') { b.positionen.push(typ === 'umbruch' ? { id: uid('p'), typ } : { id: uid('p'), typ, text: '' }); belegChanged(); return; } b.positionen.push(typ === 'frei' ? { id: uid('p'), typ: 'frei', text: '', beschreibung: '', menge: 1, einheit: 'Stk', ep: 0, ek: 0, rabatt: 0, steuer: b.kleinunternehmer ? 0 : nz(cfg().ustSatz), manuell: true } : { id: uid('p'), typ, text: '' }); belegChanged(); };
+A.posadd = t => { const typ = t.dataset.typ; const b = S.edit; if (typ === 'umbruch' || typ === 'leer' || typ === 'zwischensumme') { b.positionen.push(typ !== 'zwischensumme' ? { id: uid('p'), typ } : { id: uid('p'), typ, text: '' }); belegChanged(); return; } b.positionen.push(typ === 'frei' ? { id: uid('p'), typ: 'frei', text: '', beschreibung: '', menge: 1, einheit: 'Stk', ep: 0, ek: 0, rabatt: 0, steuer: b.kleinunternehmer ? 0 : nz(cfg().ustSatz), manuell: true } : { id: uid('p'), typ, text: '' }); belegChanged(); };
 A.posdel = t => { S.edit.positionen.splice(+t.dataset.i, 1); belegChanged(); };
 A.posdup = t => { const i = +t.dataset.i; const p = clone(S.edit.positionen[i]); p.id = uid('p'); S.edit.positionen.splice(i + 1, 0, p); belegChanged(); };
 /* Positionen mit gedrückter Maus (oder Finger) verschieben */
