@@ -2620,7 +2620,7 @@ A.bfest = () => {
   openModal({ title: 'Rechnung festschreiben', size: 'narrow', body: () => `<p>Beim Festschreiben bekommt die Rechnung ihre endgültige Nummer und kann danach <b>nicht mehr geändert oder gelöscht</b> werden (GoBD). Änderungen sind dann nur noch per Storno oder Korrekturrechnung möglich.</p>${w.length ? `<div class="note ${hard.length ? 'bad' : 'warn'}">${w.map(esc).join('<br>')}</div>` : '<div class="note ok">Alle Pflichtangaben vorhanden.</div>'}<div class="sumbox"><span>Gesamtbetrag</span><span class="r num b">${eur(belegSummen(b).brutto)}</span></div>`, foot: () => btn('Abbrechen', 'mclose') + btn(hard.length && hard.some(x => x.includes('Positionen') || x.includes('Kein Kunde')) ? 'Nicht möglich' : 'Endgültig festschreiben', 'bfestok', hard.some(x => x.includes('Positionen') || x.includes('Kein Kunde')) ? { disabled: true } : {}, 'pri') });
 };
 A.bfestok = async () => {
-  if (typeof Sync !== 'undefined' && Sync.aktiv()) { const bt = $('[data-act="bfestok"]'); if (bt) { bt.disabled = true; bt.textContent = 'Gleiche mit OneDrive ab …'; } await Promise.race([Sync.jetzt('festschreiben'), new Promise(r => setTimeout(r, 15000))]); if (Sync.st !== 'ok') toast('Hinweis: OneDrive-Abgleich vor dem Festschreiben nicht möglich – bei Arbeit auf mehreren Geräten Nummer prüfen.', 'bad'); }
+  if (typeof Sync !== 'undefined' && Sync.aktiv()) { const bt = $('[data-act="bfestok"]'); if (bt) { bt.disabled = true; bt.textContent = 'Gleiche mit ' + Sync.name() + ' ab …'; } await Promise.race([Sync.jetzt('festschreiben'), new Promise(r => setTimeout(r, 15000))]); if (Sync.st !== 'ok') toast('Hinweis: ' + Sync.name() + '-Abgleich vor dem Festschreiben nicht möglich – bei Arbeit auf mehreren Geräten Nummer prüfen.', 'bad'); }
   const b = clone(get('belege', S.edit.id)); delete b._beleg;
   if (!b.nr) b.nr = nextNummer('rechnung', b.datum);
   b.fest = true; b.festAm = new Date().toISOString(); b.festVon = S.user ? S.user.name : cfg().inhaber; b.status = 'offen';
@@ -3987,7 +3987,9 @@ async function dateiSpeichern(file, meta) {
 async function dateiHochladen(rec) {
   const buf = await IDB.get(dateiKey(rec.id)); if (!buf) return false;
   const len = buf.byteLength;
-  if (len <= 4 * 1024 * 1024) {
+  if (NC.on()) {
+    const r = await NC.put(`${rec.zweck === 'bild' ? 'Bilder' : 'Anleitungen'}/${rec.odName}`, buf, rec.typ || 'application/pdf'); if (!r.ok) throw new Error('Upload ' + r.status);
+  } else if (len <= 4 * 1024 * 1024) {
     const r = await Sync.api('PUT', odDateiPfad(rec) + ':/content', buf, { 'Content-Type': rec.typ || 'application/pdf' }); if (!r.ok) throw new Error('Upload ' + r.status);
   } else {
     const s = await Sync.api('POST', odDateiPfad(rec) + ':/createUploadSession', JSON.stringify({ item: { '@microsoft.graph.conflictBehavior': 'replace' } }), { 'Content-Type': 'application/json' });
@@ -4010,14 +4012,14 @@ async function dateiLaden(rec) {
   if (rec.assetId || rec.url) { const r = await fetch(anhangUrl(rec)); if (r.ok) return await r.blob(); return null; }
   let buf = await IDB.get(dateiKey(rec.id)); if (buf) return new Blob([buf], { type: rec.typ || 'application/pdf' });
   if (rec.odName && typeof Sync !== 'undefined' && Sync.aktiv()) {
-    const r = await Sync.api('GET', odDateiPfad(rec) + ':/content'); if (!r.ok) return null;
+    const r = NC.on() ? await NC.req('GET', `${rec.zweck === 'bild' ? 'Bilder' : 'Anleitungen'}/${rec.odName}`) : await Sync.api('GET', odDateiPfad(rec) + ':/content'); if (!r.ok) return null;
     buf = await r.arrayBuffer(); dateiSet(dateiKey(rec.id), buf); return new Blob([buf], { type: rec.typ || 'application/pdf' });
   }
   return null;
 }
 async function dateiLoeschen(rec) {
   DB.del('anhaenge', rec.id); IDB.del(dateiKey(rec.id));
-  if (rec.odName && rec.od === 'ok' && typeof Sync !== 'undefined' && Sync.aktiv()) { try { await Sync.api('DELETE', odDateiPfad(rec)); } catch (e) { } }
+  if (rec.odName && rec.od === 'ok' && typeof Sync !== 'undefined' && Sync.aktiv()) { try { if (NC.on()) await NC.req('DELETE', `${rec.zweck === 'bild' ? 'Bilder' : 'Anleitungen'}/${rec.odName}`); else await Sync.api('DELETE', odDateiPfad(rec)); } catch (e) { } }
 }
 
 /* ---------- Oberfläche ---------- */
@@ -4371,6 +4373,35 @@ async function syncLesen(buf) {
   if (u[0] === 0x1f && u[1] === 0x8b) { const st = new Blob([u]).stream().pipeThrough(new DecompressionStream('gzip')); return await new Response(st).text(); }
   return new TextDecoder().decode(u);
 }
+/* ============ Nextcloud (WebDAV, Anmeldung mit App-Passwort) ============
+   Braucht auf dem Server die App „WebAppPassword“ mit der Adresse dieser Seite als erlaubter Herkunft. */
+const NC_URL_STD = 'https://cloud.veranstaltungstechnikmarcelbrommer.de';
+const NC = {
+  conf() { return lsGet('ab:nc', null) || {}; },
+  setConf(c) { if (c) lsSet('ab:nc', c); else { try { localStorage.removeItem('ab:nc'); } catch (e) { } } },
+  on() { const c = this.conf(); return !!(c.url && c.user && c.pass); },
+  dir() { return String(this.conf().dir || 'Apps/Showcase').replace(/^\/+|\/+$/g, ''); },
+  root() { const c = this.conf(); return String(c.url).replace(/\/+$/, '') + '/remote.php/dav/files/' + encodeURIComponent(c.user) + '/'; },
+  enc(path) { return path.split('/').filter(Boolean).map(encodeURIComponent).join('/'); },
+  url(rel) { return this.root() + this.enc(this.dir() + '/' + (rel || '')); },
+  hdr() { const c = this.conf(); return { Authorization: 'Basic ' + btoa(unescape(encodeURIComponent(c.user + ':' + c.pass))) }; },
+  async req(method, rel, body, headers = {}) {
+    let r;
+    try { r = await fetch(this.url(rel), { method, cache: 'no-store', headers: { ...this.hdr(), ...headers }, body }); }
+    catch (e) { if (navigator.onLine === false) throw Object.assign(new Error('offline'), { offline: true }); throw new Error('Nextcloud nicht erreichbar (Server aus oder WebAppPassword nicht eingerichtet)'); }
+    if (r.status === 401) throw Object.assign(new Error('Anmeldung nötig'), { login: true });
+    if (r.status === 429 || r.status === 503) throw Object.assign(new Error('Nextcloud ist gerade ausgelastet'), { retryLater: true });
+    return r;
+  },
+  async mkdirs(sub) { const parts = (this.dir() + '/' + (sub || '')).split('/').filter(Boolean); let acc = ''; for (const t of parts) { acc += (acc ? '/' : '') + t; try { await fetch(this.root() + this.enc(acc), { method: 'MKCOL', headers: this.hdr() }); } catch (e) { } } },
+  async put(rel, body, type, ifMatch) {
+    const h = { 'Content-Type': type || 'application/octet-stream' }; if (ifMatch) h['If-Match'] = ifMatch;
+    let r = await this.req('PUT', rel, body, h);
+    if (r.status === 409 || r.status === 404) { await this.mkdirs(rel.split('/').slice(0, -1).join('/')); r = await this.req('PUT', rel, body, h); }
+    return r;
+  },
+  etag(r) { return r.headers.get('ETag') || r.headers.get('OC-ETag') || null; }
+};
 const Sync = {
   st: 'aus', msg: '', last: null, running: false, again: false, timer: null, poll: null, meta: null, account: '',
   conf() { const c = lsGet('ab:od', {}); if (OD_CLIENT_ID) c.clientId = OD_CLIENT_ID; return c; },
@@ -4378,8 +4409,9 @@ const Sync = {
   tok() { return lsGet('ab:odtok', null); },
   setTok(t) { lsSet('ab:odtok', t); },
   moeglich() { return !S.isEmbedded && /^https?:$/.test(location.protocol); },
-  aktiv() { const c = this.conf(); return this.moeglich() && !!c.clientId && !!c.verbunden; },
-  text() { return { ok: 'OneDrive: abgeglichen' + (this.last ? ' ' + fmtTs(this.last).slice(11) : ''), busy: 'OneDrive: gleicht ab …', err: 'OneDrive: Fehler – wird wiederholt', offline: 'OneDrive: offline – gleicht später ab', login: 'OneDrive: Anmeldung nötig', aus: 'Lokal auf diesem Gerät' }[this.st] || 'OneDrive'; },
+  aktiv() { const c = this.conf(); return this.moeglich() && (NC.on() || (!!c.clientId && !!c.verbunden)); },
+  name() { return NC.on() ? 'Nextcloud' : 'OneDrive'; },
+  text() { const N = this.name(); return { ok: N + ': abgeglichen' + (this.last ? ' ' + fmtTs(this.last).slice(11) : ''), busy: N + ': gleicht ab …', err: N + ': Fehler – wird wiederholt', offline: N + ': offline – gleicht später ab', login: N + ': Anmeldung nötig', aus: 'Lokal auf diesem Gerät' }[this.st] || N; },
   badge() { const el = $('#syncb'); if (el) { el.className = 'sync ' + ({ ok: 'ok', busy: 'busy', err: 'err', offline: 'busy', login: 'err' }[this.st] || ''); el.querySelector('span').textContent = this.text(); } const e2 = $('#odstatus'); if (e2) e2.innerHTML = this.statusHtml(); },
   auth() { return `https://login.microsoftonline.com/${this.conf().konto === 'firma' ? 'common' : 'consumers'}/oauth2/v2.0`; },
   scope: 'Files.ReadWrite.AppFolder User.Read offline_access',
@@ -4436,6 +4468,27 @@ const Sync = {
     return r;
   },
   pfad() { return `/me/drive/special/approot:/${encodeURIComponent(this.datei())}`; },
+  async kopf() { // -> {etag, dl} oder null
+    if (NC.on()) {
+      const r = await NC.req('HEAD', this.datei()); if (r.status === 404) return null;
+      if (!r.ok) throw new Error('Nextcloud antwortet mit ' + r.status);
+      const e = NC.etag(r); return { etag: e, marke: e || r.headers.get('Last-Modified') || ('t' + Date.now()) };
+    }
+    const r = await this.api('GET', this.pfad()); if (r.status === 404) return null;
+    if (r.status !== 200) throw new Error('OneDrive antwortet mit ' + r.status);
+    const m = await r.json(); return { etag: m.eTag, marke: m.eTag, dl: m['@microsoft.graph.downloadUrl'] };
+  },
+  async holen(meta) {
+    if (NC.on()) { const r = await NC.req('GET', this.datei()); if (!r.ok) throw new Error('Download fehlgeschlagen (' + r.status + ')'); const e = NC.etag(r); if (e) { meta.etag = e; meta.marke = e; } return await r.arrayBuffer(); }
+    const dr = await fetch(meta.dl); if (!dr.ok) throw new Error('Download fehlgeschlagen (' + dr.status + ')'); return await dr.arrayBuffer();
+  },
+  async schreiben(body, type, ifMatch) { // -> {status, ok, etag}
+    if (NC.on()) { const r = await NC.put(this.datei(), body, type, ifMatch); return { status: r.status, ok: r.ok, etag: NC.etag(r) }; }
+    const h = { 'Content-Type': type }; if (ifMatch) h['If-Match'] = ifMatch;
+    const r = await this.api('PUT', this.pfad() + ':/content', body, h); let etag = null;
+    if (r.ok) { try { etag = (await r.json()).eTag; } catch (e) { } }
+    return { status: r.status, ok: r.ok, etag };
+  },
 
   /* ---- Zusammenführen ---- */
   exportStand() { const d = {}; COLLS.forEach(c => d[c] = S.data[c]); return { app: 'Showcase', format: 1, firma: S.firma, firmaName: cfg().name, firmen: S.firmen, stand: new Date().toISOString(), daten: d, geloescht: S.deleted || {} }; },
@@ -4488,27 +4541,23 @@ const Sync = {
       for (let versuch = 0; versuch < 4 && !ok; versuch++) {
         try {
           const state = (await IDB.get(this.stateKey())) || {};
-          let r = await this.api('GET', this.pfad());
-          let meta = null;
-          if (r.status === 200) meta = await r.json(); else if (r.status !== 404) throw new Error('OneDrive antwortet mit ' + r.status);
+          const meta = await this.kopf();
           let hochladen = !!state.dirty || !!this.dirtyMem || !meta; let geaendert = false; const gen = this.gen || 0;
-          if (meta && meta.eTag !== state.etag) {
-            const dr = await fetch(meta['@microsoft.graph.downloadUrl']); if (!dr.ok) throw new Error('Download fehlgeschlagen (' + dr.status + ')');
-            const remote = JSON.parse(await syncLesen(await dr.arrayBuffer())); if (remote.app !== 'Showcase' && remote.app !== 'Auftragsbuch') throw new Error('Datei in OneDrive ist keine Showcase-Datei');
+          if (meta && meta.marke !== state.etag) {
+            const remote = JSON.parse(await syncLesen(await this.holen(meta))); if (remote.app !== 'Showcase' && remote.app !== 'Auftragsbuch') throw new Error('Datei in ' + this.name() + ' ist keine Showcase-Datei');
             const m = this.zusammenfuehren(remote); geaendert = m.geaendert; hochladen = hochladen || m.hochladen;
           }
           if (hochladen) {
             const body = await syncPacken(JSON.stringify(this.exportStand()));
-            const h = { 'Content-Type': body instanceof Uint8Array ? 'application/gzip' : 'application/json' }; if (meta) h['If-Match'] = meta.eTag;
-            const pr = await this.api('PUT', this.pfad() + ':/content', body, h);
+            const pr = await this.schreiben(body, body instanceof Uint8Array ? 'application/gzip' : 'application/json', meta ? meta.etag : null);
             if (pr.status === 412 || pr.status === 409) { continue; }
             if (!pr.ok) throw new Error('Hochladen fehlgeschlagen (' + pr.status + ')');
-            const pj = await pr.json(); const nochDirty = (this.gen || 0) !== gen; await IDB.set(this.stateKey(), { etag: pj.eTag, dirty: nochDirty, last: new Date().toISOString() }); if (nochDirty) this.again = true;
-          } else await IDB.set(this.stateKey(), { etag: meta ? meta.eTag : state.etag, dirty: (this.gen || 0) !== gen, last: new Date().toISOString() });
+            const nochDirty = (this.gen || 0) !== gen; await IDB.set(this.stateKey(), { etag: pr.etag, dirty: nochDirty, last: new Date().toISOString() }); if (nochDirty) this.again = true;
+          } else await IDB.set(this.stateKey(), { etag: meta ? meta.marke : state.etag, dirty: (this.gen || 0) !== gen, last: new Date().toISOString() });
           if ((this.gen || 0) === gen) this.dirtyMem = false; this.last = new Date().toISOString(); this.st = 'ok'; this.msg = ''; ok = true;
           if (geaendert) { afterSyncRender(); }
         } catch (e) {
-          if (e.login) { this.st = 'login'; this.msg = 'Die Anmeldung bei Microsoft ist abgelaufen. Bitte neu verbinden.'; break; }
+          if (e.login) { this.st = 'login'; this.msg = NC.on() ? 'Nextcloud lehnt die Anmeldung ab – Benutzername und App-Passwort prüfen.' : 'Die Anmeldung bei Microsoft ist abgelaufen. Bitte neu verbinden.'; break; }
           if (e.offline) { this.st = 'offline'; this.msg = 'Keine Internetverbindung. Änderungen bleiben auf dem Gerät und werden später abgeglichen.'; break; }
           if (e.retryLater) { this.st = 'err'; this.msg = e.message; break; }
           this.st = 'err'; this.msg = e.message; console.warn('Sync', e); break;
@@ -4528,29 +4577,53 @@ const Sync = {
     await this.rueckkehr();
     if (!this.aktiv()) { this.badge(); return; }
     const t = this.tok();
-    if ((!t || !t.refresh) && !sessionStorage.getItem('ab:odstumm') && navigator.onLine !== false) { sessionStorage.setItem('ab:odstumm', '1'); this.anmelden(true); return; }
+    if (!NC.on() && (!t || !t.refresh) && !sessionStorage.getItem('ab:odstumm') && navigator.onLine !== false) { sessionStorage.setItem('ab:odstumm', '1'); this.anmelden(true); return; }
     await this.jetzt('start');
-    if (this.st === 'login' && !sessionStorage.getItem('ab:odstumm') && navigator.onLine !== false) { sessionStorage.setItem('ab:odstumm', '1'); this.anmelden(true); return; }
+    if (!NC.on() && this.st === 'login' && !sessionStorage.getItem('ab:odstumm') && navigator.onLine !== false) { sessionStorage.setItem('ab:odstumm', '1'); this.anmelden(true); return; }
     clearInterval(this.poll); this.poll = setInterval(() => { if (document.visibilityState === 'visible' || this.dirtyMem) this.jetzt('intervall'); }, 30000);
     document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') this.jetzt('sichtbar'); else if (this.dirtyMem) this.jetzt('verlassen'); });
     window.addEventListener('online', () => this.jetzt('online'));
   },
   bald() { if (!this.aktiv()) return; this.plan(400); },
   onFirma() { if (this.aktiv()) this.jetzt('firma'); },
-  trennen() { const c = this.conf(); c.verbunden = false; this.setConf(c); this.setTok(null); this.st = 'aus'; clearInterval(this.poll); this.badge(); },
+  trennen() { if (NC.on()) NC.setConf(null); else { const c = this.conf(); c.verbunden = false; this.setConf(c); this.setTok(null); } this.st = 'aus'; clearInterval(this.poll); this.badge(); },
   statusHtml() {
     const c = this.conf(); const cls = { ok: 'ok', busy: 'info', err: 'bad', offline: 'warn', login: 'bad' }[this.st] || '';
-    return `${pill(this.text(), cls)} ${c.konto_name ? `<span class="small muted">Konto: ${esc(c.konto_name)}</span>` : ''}${this.msg ? `<div class="small" style="margin-top:6px;color:var(--${this.st === 'offline' ? 'warn' : 'bad'})">${esc(this.msg)}</div>` : ''}`;
+    const kn = NC.on() ? NC.conf().user : c.konto_name; return `${pill(this.text(), cls)} ${kn ? `<span class="small muted">Konto: ${esc(kn)}</span>` : ''}${this.msg ? `<div class="small" style="margin-top:6px;color:var(--${this.st === 'offline' ? 'warn' : 'bad'})">${esc(this.msg)}</div>` : ''}`;
   }
 };
 function afterSyncRender() { S.pendingRender = false; const a = document.activeElement; if (a && a.matches && a.matches('input,textarea,select')) { S.pendingRender = true; return; } rerenderKeepScroll(); }
 
 /* Einstellungen → OneDrive */
+function ncKarte() {
+  const c = NC.conf();
+  return card('Nextcloud-Abgleich', `${NC.on() ? `<div id="odstatus">${Sync.statusHtml()}</div>` : '<p class="small" style="margin-top:0">Noch nicht verbunden. Die Daten liegen dann nur auf diesem Gerät.</p>'}
+    <div class="form" style="margin-top:12px">${fld('Nextcloud-Adresse', `<input class="inp mono" id="ncurl" value="${esc(c.url || NC_URL_STD)}" autocomplete="off" spellcheck="false">`, 'w12')}${fld('Benutzername', `<input class="inp" id="ncuser" value="${esc(c.user || '')}" autocomplete="username" spellcheck="false">`, 'w6')}${fld('App-Passwort', `<input class="inp" id="ncpass" type="password" value="${esc(c.pass || '')}" autocomplete="current-password">`, 'w6', 'Nextcloud → Persönliche Einstellungen → Sicherheit')}${fld('Ordner in der Nextcloud', `<input class="inp mono" id="ncdir" value="${esc(NC.dir())}" autocomplete="off" spellcheck="false">`, 'w12')}</div>
+    <div class="bar" style="margin-top:12px">${btn(NC.on() ? 'Speichern und neu verbinden' : 'Mit Nextcloud verbinden', 'ncverbinden', {}, 'pri')}${NC.on() ? btn('Jetzt abgleichen', 'odsync') + btn('Trennen', 'odtrennen', {}, 'danger') : ''}</div>
+    <p class="small muted">Gespeichert wird die Datei <span class="mono">${esc(NC.dir())}/${esc(Sync.datei())}</span> in deiner Nextcloud, Anleitungen und Bilder in den Unterordnern „Anleitungen“ und „Bilder“.</p>`);
+}
+A.ncverbinden = async () => {
+  const v = id => ($(id)?.value || '').trim();
+  const c = { url: v('#ncurl').replace(/\/+$/, ''), user: v('#ncuser'), pass: v('#ncpass'), dir: v('#ncdir').replace(/^\/+|\/+$/g, '') || 'Apps/Showcase' };
+  if (!/^https:\/\//.test(c.url) || !c.user || !c.pass) { toast('Bitte Adresse (mit https://), Benutzername und App-Passwort eintragen.', 'bad'); return; }
+  const alt = NC.conf(); NC.setConf(c);
+  try {
+    let r = await NC.req('PROPFIND', '', null, { Depth: '0' });
+    if (r.status === 404) { await NC.mkdirs(''); r = await NC.req('PROPFIND', '', null, { Depth: '0' }); }
+    if (!r.ok && r.status !== 207) throw new Error('Fehler ' + r.status);
+    await IDB.set(Sync.stateKey(), { dirty: true });
+    toast('Mit Nextcloud verbunden.'); Sync.start(); const ok = await Sync.jetzt('verbunden'); dateiAlleNeu(); rerenderKeepScroll();
+    if (!ok) toast('Verbunden, aber der Abgleich klappte noch nicht: ' + (Sync.msg || ''), 'bad');
+  } catch (e) { NC.setConf(alt.url ? alt : null); toast(e.login ? 'Anmeldung abgelehnt – Benutzername oder App-Passwort stimmt nicht.' : (e.message || 'Verbindung fehlgeschlagen.'), 'bad'); }
+};
+// Beim Wechsel des Speichers: alle Dateien, die auf diesem Gerät liegen, in die Nextcloud hochladen
+async function dateiAlleNeu() { for (const rec of all('anhaenge')) if (rec.odName && rec.od === 'ok' && await IDB.get(dateiKey(rec.id))) DB.put('anhaenge', { ...rec, od: 'offen' }); dateiWarteschlange(); }
 function onedriveView() {
   const c = Sync.conf();
-  if (!Sync.moeglich()) return card('OneDrive-Abgleich', `<div class="note info">${S.isEmbedded ? 'Diese Version läuft über deinen Claude-Link und speichert bereits in der Cloud – alle Geräte haben automatisch denselben Stand. Der OneDrive-Abgleich ist für die eigenständige Version (z. B. bei GitHub Pages).' : 'Der OneDrive-Abgleich funktioniert nur, wenn die App über eine Internetadresse geöffnet wird (z. B. bei GitHub Pages), nicht als Datei vom Laufwerk.'}</div>`);
+  if (!Sync.moeglich()) return card('Nextcloud-Abgleich', `<div class="note info">${S.isEmbedded ? 'Diese Version läuft über deinen Claude-Link und speichert bereits in der Cloud – alle Geräte haben automatisch denselben Stand. Der OneDrive-Abgleich ist für die eigenständige Version (z. B. bei GitHub Pages).' : 'Der OneDrive-Abgleich funktioniert nur, wenn die App über eine Internetadresse geöffnet wird (z. B. bei GitHub Pages), nicht als Datei vom Laufwerk.'}</div>`);
   const ru = Sync.redirectUri();
-  return `<div class="grid g2">${card('OneDrive-Abgleich', `<div id="odstatus">${Sync.statusHtml()}</div>
+  if (NC.on()) return `<div class="grid g2">${ncKarte()}${card('OneDrive (alt)', '<p class="small" style="margin-top:0">Nicht mehr in Benutzung – Showcase gleicht jetzt über die Nextcloud ab. Die alte Datei in OneDrive bleibt unverändert liegen.</p>')}</div>`;
+  return `<div class="grid g2">${ncKarte()}${card('OneDrive-Abgleich (alt)', `<div id="odstatus">${Sync.statusHtml()}</div>
     <div class="form" style="margin-top:12px">${fld('Client-ID (Anwendungs-ID)', `<input class="inp mono" id="odclient" value="${esc(c.clientId || '')}" placeholder="z. B. 1a2b3c4d-…" ${OD_CLIENT_ID ? 'readonly' : ''}>`, 'w12', OD_CLIENT_ID ? 'fest eingebaut – muss nicht eingegeben werden' : 'aus der App-Registrierung bei Microsoft (siehe Anleitung)')}${fld('Konto', `<select class="inp" id="odkonto"><option value="privat" ${c.konto !== 'firma' ? 'selected' : ''}>Privates Microsoft-Konto (OneDrive privat / Microsoft 365 Single/Family)</option><option value="firma" ${c.konto === 'firma' ? 'selected' : ''}>Geschäfts- oder Schulkonto (OneDrive for Business)</option></select>`, 'w12')}</div>
     <div class="bar" style="margin-top:12px">${c.verbunden ? btn('Jetzt abgleichen', 'odsync', {}, 'pri') + btn('Neu anmelden', 'odlogin') + btn('Trennen', 'odtrennen', {}, 'danger') : btn('Mit OneDrive verbinden', 'odlogin', {}, 'pri')}</div>
     <p class="small muted">Gespeichert wird die Datei <span class="mono">Apps/Showcase/${esc(Sync.datei())}</span> in deinem OneDrive. Die App darf nur auf ihren eigenen Ordner zugreifen, nicht auf deine anderen Dateien.</p>`)}
@@ -4566,8 +4639,8 @@ function onedriveView() {
   ${card('So funktioniert der Abgleich', `<div class="list small">${[['Automatisch', 'Alle 30 Sekunden wird der komplette Stand in OneDrive gespeichert bzw. von dort geholt – außerdem beim Öffnen, beim Zurückkehren zur App und wenige Sekunden nach jeder Änderung.'], ['Offline', 'Ohne Internet arbeitest du normal weiter. Änderungen bleiben auf dem Gerät und werden beim nächsten Abgleich hochgeladen.'], ['Gleichzeitig auf zwei Geräten', 'Jeder Datensatz (Kunde, Beleg, Stempelung …) wird einzeln zusammengeführt. Wurde derselbe Datensatz auf zwei Geräten geändert, gilt die zuletzt gespeicherte Änderung. Gelöschtes bleibt gelöscht.'], ['Rechnungsnummern', 'Vor dem Festschreiben holt die App den neuesten Stand, damit keine Nummer doppelt vergeben wird. Sollte das offline doch passieren, warnt die Übersicht.'], ['Anmeldung', 'Microsoft verlangt bei Web-Apps regelmäßig eine Bestätigung. Die App erledigt das beim Öffnen meist automatisch; sonst erscheint „Anmeldung nötig“.']].map(([t, s]) => `<div class="li"><div class="grow"><div class="t1">${t}</div><div class="t2" style="white-space:normal">${s}</div></div></div>`).join('')}</div>`, '', true)}`;
 }
 A.odlogin = () => { const c = Sync.conf(); const id = ($('#odclient')?.value || c.clientId || '').trim(); if (!/^[0-9a-f-]{36}$/i.test(id)) { toast('Die Client-ID sieht nicht richtig aus (Format: 8-4-4-4-12 Zeichen).', 'bad'); return; } c.clientId = id; c.konto = $('#odkonto')?.value || c.konto || 'privat'; Sync.setConf(c); sessionStorage.removeItem('ab:odstumm'); Sync.anmelden(false); };
-A.odsync = async () => { const ok = await Sync.jetzt('manuell'); toast(ok ? 'Mit OneDrive abgeglichen.' : 'Abgleich nicht möglich: ' + (Sync.msg || ''), ok ? '' : 'bad'); rerenderKeepScroll(); };
-A.odtrennen = () => confirmBox('OneDrive-Abgleich auf diesem Gerät trennen? Die Daten bleiben auf dem Gerät und in OneDrive erhalten.', 'Trennen', () => { Sync.trennen(); rerenderKeepScroll(); });
+A.odsync = async () => { const ok = await Sync.jetzt('manuell'); toast(ok ? 'Mit ' + Sync.name() + ' abgeglichen.' : 'Abgleich nicht möglich: ' + (Sync.msg || ''), ok ? '' : 'bad'); rerenderKeepScroll(); };
+A.odtrennen = () => confirmBox(Sync.name() + '-Abgleich auf diesem Gerät trennen? Die Daten bleiben auf dem Gerät und in ' + Sync.name() + ' erhalten.', 'Trennen', () => { Sync.trennen(); rerenderKeepScroll(); });
 
 /* Abgleich aus einer Datei (z. B. per USB-Stick oder E-Mail), ohne etwas zu ersetzen */
 A.file_mergefile = async el => { const f = el.files[0]; if (!f) return; let j; try { j = JSON.parse(await readFile(f, 'text')); } catch (e) { toast('Datei ist keine gültige Sicherung.', 'bad'); return; } if (!j.daten) { toast('Datei ist keine Showcase-Datei.', 'bad'); return; } const vor = COLLS.reduce((s, c) => s + all(c).length, 0); const m = Sync.zusammenfuehren({ daten: j.daten, geloescht: j.geloescht || {}, firmen: j.firmen || [] }); const nach = COLLS.reduce((s, c) => s + all(c).length, 0); audit('Abgleich aus Datei', f.name, `${nach - vor} neue Datensätze`); if (m.hochladen || m.geaendert) Sync.changed(); toast(`Abgeglichen: ${Math.max(0, nach - vor)} neue Datensätze, Änderungen übernommen.`); rerenderKeepScroll(); };
@@ -4643,7 +4716,7 @@ VIEWS.einstellungen = () => {
   const tab = curTab('einst', 'firma');
   if (!S.edit || !S.edit._cfg) { S.edit = clone(cfg()); S.edit._cfg = true; }
   const e = S.edit; S.onEdit = (path) => { S.cfgDirty = true; const b = $('#cfgsave'); if (b) b.disabled = false; if (/^nummern\./.test(path || '')) nrVorschau(S.edit); };
-  const tbs = [['firma', 'Firma'], ['belege', 'Belege & Texte'], ['preise', 'Preise & Mietfaktor'], ['steuer', 'Steuer & Konten'], ['mahnung', 'Mahnwesen'], ['listen', 'Listen'], ['fahrzeuge', 'Fahrzeuge'], ['stempel', 'Stempeluhr'], ['darstellung', 'Darstellung'], ['unterschrift', 'Unterschrift'], ['benutzer', 'Benutzer & Rechte'], ['onedrive', 'OneDrive-Abgleich'], ['daten', 'Daten & Sicherung'], ['protokoll', 'Protokoll'], ['hinweise', 'Hinweise']];
+  const tbs = [['firma', 'Firma'], ['belege', 'Belege & Texte'], ['preise', 'Preise & Mietfaktor'], ['steuer', 'Steuer & Konten'], ['mahnung', 'Mahnwesen'], ['listen', 'Listen'], ['fahrzeuge', 'Fahrzeuge'], ['stempel', 'Stempeluhr'], ['darstellung', 'Darstellung'], ['unterschrift', 'Unterschrift'], ['benutzer', 'Benutzer & Rechte'], ['onedrive', 'Nextcloud-Abgleich'], ['daten', 'Daten & Sicherung'], ['protokoll', 'Protokoll'], ['hinweise', 'Hinweise']];
   let body = '';
   const L = (k, l, w = 'w6', o = {}) => fld(l, inp('e.' + k, getPath(e, k), o), w);
   if (tab === 'firma') body = card('Firmendaten (erscheinen auf allen Belegen)', `<div class="form">${L('name', 'Firmenname', 'w8')}${L('zusatz', 'Zusatz / Slogan', 'w4')}${L('inhaber', 'Inhaber', 'w6')}${L('strasse', 'Straße, Nr.', 'w6')}${L('plz', 'PLZ', 'w2')}${L('ort', 'Ort', 'w4')}${L('land', 'Land', 'w6')}${L('tel', 'Telefon', 'w4')}${L('email', 'E-Mail', 'w4')}${L('web', 'Website', 'w4')}${L('instagram', 'Instagram', 'w4', { placeholder: 'z. B. vt_marcel.brommer' })}<h4>Steuer & Bank</h4>${L('steuernr', 'Steuernummer', 'w4')}${L('ustid', 'USt-IdNr.', 'w4')}${L('finanzamt', 'Finanzamt', 'w4')}${L('bank', 'Bank', 'w4')}${L('iban', 'IBAN', 'w4')}${L('bic', 'BIC', 'w4')}${L('kontoinhaber', 'Kontoinhaber', 'w6')}<h4>Layout</h4><div class="w4 fld"><span>Logo (wird als JPEG gespeichert)</span>${e.logo ? `<img src="${e.logo}" alt="Logo" style="max-height:70px;max-width:220px;background:#fff;padding:4px;border:1px solid var(--line);border-radius:6px">` : '<span class="small muted">kein Logo</span>'}<div class="bar"><label class="btn sm">Logo wählen<input type="file" accept="image/*" data-file="logo" hidden></label>${e.logo ? btn('Entfernen', 'logorm', {}, 'sm ghost') : ''}</div></div>${fld('Akzentfarbe Belege', `<input class="inp" type="color" data-b="e.farbe" value="${esc(e.farbe || '#1C232C')}" style="height:38px">`, 'w2')}${fld('Zusätzliche Fußzeile', inp('e.fusszeile', e.fusszeile, { placeholder: 'z. B. Handelsregister, Gerichtsstand' }), 'w6')}</div>`) +
@@ -4733,7 +4806,7 @@ A.logout = () => { S.user = null; lsSet('ab:session', null); S.edit = null; clos
 /* Daten & Sicherung */
 function datenView() {
   const n = COLLS.reduce((s, c) => s + all(c).length, 0); const firmen = S.firmen.length ? S.firmen : [{ id: S.firma, name: cfg().name }];
-  return `<div class="grid g2">${card('Speicherort', `<div class="list"><div class="li"><span class="grow">Modus</span><b>${S.mode === 'cloud' ? 'Cloud (alle Geräte gleicher Stand)' : Sync.aktiv() ? 'Gerät + OneDrive-Abgleich' : 'Lokal auf diesem Gerät'}</b></div><div class="li"><span class="grow">Datensätze</span><b class="num">${n}</b></div><div class="li"><span class="grow">Status</span><span id="syncb2">${syncText()}</span></div>${S.syncMsg ? `<div class="li small" style="color:var(--bad)">${esc(S.syncMsg)}</div>` : ''}</div>${S.mode !== 'cloud' ? (Sync.aktiv() ? '<p class="small muted">Die Daten liegen auf diesem Gerät und werden mit OneDrive abgeglichen.</p>' : '<p class="small muted">Im lokalen Modus liegen die Daten nur in diesem Browser. Richte den OneDrive-Abgleich ein oder exportiere regelmäßig eine Sicherung.</p>') : '<p class="small muted">Zusätzlich legt die App täglich eine Sicherung im Browser dieses Geräts an.</p>'}`, '', false)}
+  return `<div class="grid g2">${card('Speicherort', `<div class="list"><div class="li"><span class="grow">Modus</span><b>${S.mode === 'cloud' ? 'Cloud (alle Geräte gleicher Stand)' : Sync.aktiv() ? 'Gerät + ' + Sync.name() + '-Abgleich' : 'Lokal auf diesem Gerät'}</b></div><div class="li"><span class="grow">Datensätze</span><b class="num">${n}</b></div><div class="li"><span class="grow">Status</span><span id="syncb2">${syncText()}</span></div>${S.syncMsg ? `<div class="li small" style="color:var(--bad)">${esc(S.syncMsg)}</div>` : ''}</div>${S.mode !== 'cloud' ? (Sync.aktiv() ? '<p class="small muted">Die Daten liegen auf diesem Gerät und werden mit OneDrive abgeglichen.</p>' : '<p class="small muted">Im lokalen Modus liegen die Daten nur in diesem Browser. Richte den OneDrive-Abgleich ein oder exportiere regelmäßig eine Sicherung.</p>') : '<p class="small muted">Zusätzlich legt die App täglich eine Sicherung im Browser dieses Geräts an.</p>'}`, '', false)}
   ${card('Datensicherung', `<div class="list"><div class="li"><div class="grow"><div class="t1">Komplette Sicherung exportieren</div><div class="t2">Alle Daten dieser Firma als JSON-Datei (inkl. lokal gespeicherter Belegfotos)</div></div>${btn(ic('dl') + 'Exportieren', 'backup', {}, 'sm pri')}</div><div class="li"><div class="grow"><div class="t1">Sicherung einspielen</div><div class="t2">Ersetzt alle Daten dieser Firma durch die Sicherung</div></div><label class="btn sm">Datei wählen<input type="file" accept=".json,application/json" data-file="restore" hidden></label></div><div class="li"><div class="grow"><div class="t1">Mit Datei abgleichen</div><div class="t2">Führt eine Sicherung von einem anderen Gerät mit diesen Daten zusammen – nichts wird ersetzt</div></div><label class="btn sm">Datei wählen<input type="file" accept=".json,application/json" data-file="mergefile" hidden></label></div><div class="li"><div class="grow"><div class="t1">Automatische Sicherungen</div><div class="t2">täglich im Browser dieses Geräts, die letzten 10</div></div>${btn('Anzeigen', 'autobackups', {}, 'sm')}</div></div>`, '', true)}</div>
   <div class="grid g2">${card('Mehrere Firmen', `<div class="list">${firmen.map(f => `<div class="li"><span class="grow ${f.id === S.firma ? 'b' : ''}">${esc(f.name)}</span>${f.id === S.firma ? pill('aktiv', 'ok') : btn('Wechseln', 'firmawechsel', { 'data-id': f.id }, 'sm')}</div>`).join('')}</div><div class="bar" style="padding:10px 16px">${btn('+ Weitere Firma', 'firmaneu', {}, 'sm')}<span class="small muted">Jede Firma hat eigene Kunden, Artikel, Belege und Nummernkreise.</span></div>`, '', true)}
   ${card('Beispieldaten', `<p class="small" style="margin-top:0">Zum Ausprobieren: Kunden, Artikel, Zumiete, Personal, Veranstaltungen, Belege und Zeiten. Alle Beispiel-Datensätze sind markiert und lassen sich wieder entfernen.</p><div class="bar">${btn('Beispieldaten laden', 'demo', {}, 'sm')}${btn('Beispieldaten entfernen', 'demorm', {}, 'sm danger')}</div>`)}</div>`;
