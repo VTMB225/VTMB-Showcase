@@ -4369,8 +4369,10 @@ async function syncPacken(text) {
   try { const st = new Blob([text]).stream().pipeThrough(new CompressionStream('gzip')); return new Uint8Array(await new Response(st).arrayBuffer()); } catch (e) { return text; }
 }
 async function syncLesen(buf) {
-  const u = new Uint8Array(buf);
-  if (u[0] === 0x1f && u[1] === 0x8b) { const st = new Blob([u]).stream().pipeThrough(new DecompressionStream('gzip')); return await new Response(st).text(); }
+  // Auch mehrfach gepackte Dateien lesen (z. B. wenn der Server die gepackte Datei beim Ausliefern nochmals packt)
+  let u = new Uint8Array(buf);
+  for (let i = 0; i < 4 && u[0] === 0x1f && u[1] === 0x8b; i++) { const st = new Blob([u]).stream().pipeThrough(new DecompressionStream('gzip')); u = new Uint8Array(await new Response(st).arrayBuffer()); }
+  if (u[0] === 0xef && u[1] === 0xbb && u[2] === 0xbf) u = u.slice(3);
   return new TextDecoder().decode(u);
 }
 /* ============ Nextcloud (WebDAV, Anmeldung mit App-Passwort) ============
