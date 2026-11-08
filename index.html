@@ -5649,7 +5649,8 @@ const NC = {
   hdr() { const c = this.conf(); return { Authorization: 'Basic ' + btoa(unescape(encodeURIComponent(c.user + ':' + c.pass))) }; },
   async req(method, rel, body, headers = {}) {
     let r;
-    try { r = await fetch(this.url(rel), { method, cache: 'no-store', headers: { ...this.hdr(), ...headers }, body }); }
+    // Kein „cache: no-store“: Safari hängt dann Cache-Control/Pragma an die Anfrage, und die blockiert der Server (CORS). Stattdessen frische URL beim Lesen.
+    try { r = await fetch(this.url(rel) + (method === 'GET' ? '?t=' + Date.now() : ''), { method, headers: { ...this.hdr(), ...headers }, body }); }
     catch (e) { if (navigator.onLine === false) throw Object.assign(new Error('offline'), { offline: true }); throw new Error('Nextcloud nicht erreichbar (Server aus oder WebAppPassword nicht eingerichtet)'); }
     if (r.status === 401) throw Object.assign(new Error('Anmeldung nötig'), { login: true });
     if (r.status === 429 || r.status === 503) throw Object.assign(new Error('Nextcloud ist gerade ausgelastet'), { retryLater: true });
