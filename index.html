@@ -4381,7 +4381,13 @@ const NC = {
   setConf(c) { if (c) lsSet('ab:nc', c); else { try { localStorage.removeItem('ab:nc'); } catch (e) { } } },
   on() { const c = this.conf(); return !!(c.url && c.user && c.pass); },
   dir() { return String(this.conf().dir || 'Apps/Showcase').replace(/^\/+|\/+$/g, ''); },
-  root() { const c = this.conf(); return String(c.url).replace(/\/+$/, '') + '/remote.php/dav/files/' + encodeURIComponent(c.user) + '/'; },
+  root() { const c = this.conf(); return String(c.url).replace(/\/+$/, '') + '/remote.php/dav/files/' + encodeURIComponent(c.uid || c.user) + '/'; },
+  async findUid(c) { // Anmeldename (z. B. E-Mail) -> interne Benutzerkennung für die WebDAV-Pfade
+    let r; try { r = await fetch(String(c.url).replace(/\/+$/, '') + '/remote.php/dav/', { method: 'PROPFIND', headers: { ...this.hdr(), Depth: '0', 'Content-Type': 'application/xml' }, body: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>' }); }
+    catch (e) { throw new Error('Nextcloud nicht erreichbar (Server aus oder WebAppPassword nicht eingerichtet)'); }
+    if (r.status === 401) throw Object.assign(new Error('Anmeldung nötig'), { login: true });
+    const m = (await r.text()).match(/principals\/users\/([^<\/]+)/); return m ? decodeURIComponent(m[1]) : c.user;
+  },
   enc(path) { return path.split('/').filter(Boolean).map(encodeURIComponent).join('/'); },
   url(rel) { return this.root() + this.enc(this.dir() + '/' + (rel || '')); },
   hdr() { const c = this.conf(); return { Authorization: 'Basic ' + btoa(unescape(encodeURIComponent(c.user + ':' + c.pass))) }; },
@@ -4608,6 +4614,7 @@ A.ncverbinden = async () => {
   if (!/^https:\/\//.test(c.url) || !c.user || !c.pass) { toast('Bitte Adresse (mit https://), Benutzername und App-Passwort eintragen.', 'bad'); return; }
   const alt = NC.conf(); NC.setConf(c);
   try {
+    c.uid = await NC.findUid(c); NC.setConf(c);
     let r = await NC.req('PROPFIND', '', null, { Depth: '0' });
     if (r.status === 404) { await NC.mkdirs(''); r = await NC.req('PROPFIND', '', null, { Depth: '0' }); }
     if (!r.ok && r.status !== 207) throw new Error('Fehler ' + r.status);
