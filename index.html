@@ -4406,7 +4406,14 @@ const NC = {
     if (r.status === 409 || r.status === 404) { await this.mkdirs(rel.split('/').slice(0, -1).join('/')); r = await this.req('PUT', rel, body, h); }
     return r;
   },
-  etag(r) { return r.headers.get('ETag') || r.headers.get('OC-ETag') || null; }
+  etag(r) { return this.sauber(r.headers.get('OC-ETag') || r.headers.get('ETag')); },
+  sauber(e) { return e ? e.replace(/^W\//, '').replace(/-(gzip|br|deflate)"$/, '"') : null; },
+  async info(rel) { // ETag/Datum über PROPFIND – nicht von der Kompression des Servers verfälscht
+    const r = await this.req('PROPFIND', rel, '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:getlastmodified/></d:prop></d:propfind>', { Depth: '0', 'Content-Type': 'application/xml' });
+    if (r.status === 404) return null; if (!r.ok && r.status !== 207) throw new Error('Nextcloud antwortet mit ' + r.status);
+    const x = await r.text(); const e = (x.match(/<d:getetag>([^<]*)<\/d:getetag>/) || [])[1]; const lm = (x.match(/<d:getlastmodified>([^<]*)<\/d:getlastmodified>/) || [])[1];
+    const et = e ? this.sauber(e.replace(/&quot;/g, '"')) : null; return { etag: et, lm: lm || null };
+  }
 };
 const Sync = {
   st: 'aus', msg: '', last: null, running: false, again: false, timer: null, poll: null, meta: null, account: '',
@@ -4476,16 +4483,15 @@ const Sync = {
   pfad() { return `/me/drive/special/approot:/${encodeURIComponent(this.datei())}`; },
   async kopf() { // -> {etag, dl} oder null
     if (NC.on()) {
-      const r = await NC.req('HEAD', this.datei()); if (r.status === 404) return null;
-      if (!r.ok) throw new Error('Nextcloud antwortet mit ' + r.status);
-      const e = NC.etag(r); return { etag: e, marke: e || r.headers.get('Last-Modified') || ('t' + Date.now()) };
+      const i = await NC.info(this.datei()); if (!i) return null;
+      return { etag: i.etag, marke: i.etag || i.lm || ('t' + Date.now()) };
     }
     const r = await this.api('GET', this.pfad()); if (r.status === 404) return null;
     if (r.status !== 200) throw new Error('OneDrive antwortet mit ' + r.status);
     const m = await r.json(); return { etag: m.eTag, marke: m.eTag, dl: m['@microsoft.graph.downloadUrl'] };
   },
   async holen(meta) {
-    if (NC.on()) { const r = await NC.req('GET', this.datei()); if (!r.ok) throw new Error('Download fehlgeschlagen (' + r.status + ')'); const e = NC.etag(r); if (e) { meta.etag = e; meta.marke = e; } return await r.arrayBuffer(); }
+    if (NC.on()) { const r = await NC.req('GET', this.datei()); if (!r.ok) throw new Error('Download fehlgeschlagen (' + r.status + ')'); return await r.arrayBuffer(); }
     const dr = await fetch(meta.dl); if (!dr.ok) throw new Error('Download fehlgeschlagen (' + dr.status + ')'); return await dr.arrayBuffer();
   },
   async schreiben(body, type, ifMatch) { // -> {status, ok, etag}
